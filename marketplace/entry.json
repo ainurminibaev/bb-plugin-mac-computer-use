@@ -1,0 +1,33 @@
+{
+  "id": "mac-computer-use",
+  "displayName": "Mac Computer Use",
+  "description": "Let agents see and control a connected Mac — screenshots, clicks, typing, apps — with per-computer access control.",
+  "icon": {
+    "url": "./icons/mac-computer-use.svg"
+  },
+  "screenshots": [
+    "./screenshots/mac-computer-use/light.png",
+    "./screenshots/mac-computer-use/dark.png"
+  ],
+  "tags": [
+    "computer-use",
+    "macos",
+    "automation",
+    "screenshots",
+    "agents",
+    "cua"
+  ],
+  "author": {
+    "name": "ainurminibaev",
+    "github": "ainurminibaev",
+    "url": "https://github.com/ainurminibaev"
+  },
+  "category": "utilities",
+  "overview": "./overview/mac-computer-use.md",
+  "source": {
+    "git": {
+      "url": "https://github.com/ainurminibaev/bb-plugin-mac-computer-use.git",
+      "range": "^0.3.0"
+    }
+  }
+}

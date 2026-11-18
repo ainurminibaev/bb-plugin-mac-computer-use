@@ -1,0 +1,33 @@
+# Changelog
+
+Format: [Keep a Changelog](https://keepachangelog.com/), versions: [SemVer](https://semver.org/). Git tags: `vX.Y.Z`.
+
+## [0.3.0] — 2026-11-18
+
+### Added
+- Command-line-first ladder for agents (shell/osascript → AppleScript, Shortcuts, APIs, Accessibility → GUI) in the skill, tool descriptions and READMEs.
+- Required `why_gui` argument on `mac_screenshot` and `mac_action`; the reason is echoed in the result and kept in a GUI action journal on the settings screen.
+- Separate «coordinate mouse» permission: with it off, agents act only on UI elements (no x,y clicks, drags, cursor moves or foreground delivery).
+
+### Changed
+- Settings wording: the plugin grants GUI access; command access through `bb terminal` is governed by BB.
+
+## [0.2.0] — 2026-11-18
+
+### Added
+- Settings screen «Computers and access»: per-computer on/off, screen and mouse/keyboard switches, app allowlist.
+- Cua Driver install/update from settings, verified by SHA-256 and Developer ID team `YCK386LBJ7`; update swaps the app bundle and keeps the previous copy in the Trash.
+- macOS permission status and a button that opens the driver's permission guide.
+- Connection check with a live screenshot thumbnail.
+- One driver session per BB thread, so window snapshots and element tokens survive between tool calls.
+- Compact tool help in `mac_tool_info`.
+
+### Fixed
+- Driver daemon auto-start (status text was read from the wrong stream).
+- Machine lookup by name with a non-breaking space or em dash in the name; unique partial names also match.
+- With an app allowlist, `list_windows` requires an allowed `app` or `pid` instead of listing every window.
+
+## [0.1.0] — 2026-11-18
+
+### Added
+- Agent tools `mac_screenshot`, `mac_action`, `mac_tool_info` over Cua Driver; screenshots downscaled to JPEG; deny list for risky driver tools.
