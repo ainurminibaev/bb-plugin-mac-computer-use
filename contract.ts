@@ -43,7 +43,7 @@ export const hostContract = defineRpcContract({
       wantImage: z.boolean(),
       maxImageWidth: z.number().int().min(160).max(4096),
       /** Visible mode: agent cursor + caption overlay; optional bring-to-front. */
-      display: z.object({ show: z.boolean(), title: z.string().max(200), step: z.string().max(200), foreground: z.boolean(), realMouse: z.boolean().default(false), theme: z.enum(['dark', 'light', 'accent']).default('dark') }).nullable().default(null),
+      display: z.object({ show: z.boolean(), title: z.string().max(200), step: z.string().max(200), label: z.string().max(80).optional(), foreground: z.boolean(), realMouse: z.boolean().default(false), theme: z.enum(['dark', 'light', 'accent']).default('dark') }).nullable().default(null),
     }),
     output: callResultSchema,
   },
@@ -60,12 +60,14 @@ export const hostContract = defineRpcContract({
     input: z.object({ version: z.string().regex(/^\d+\.\d+\.\d+$/), teamId: z.string().regex(/^[A-Z0-9]{10}$/) }),
     output: z.object({ ok: z.boolean(), log: z.string() }),
   },
+  /** The agent's turn ended: hide the session HUD. */
+  endSession: { input: z.object({ session: z.string().max(100) }), output: z.object({ ok: z.boolean() }) },
   /** Sessions the user stopped with the overlay's «Stop agent» button. */
   stopped: { input: z.null(), output: z.object({ sessions: z.array(z.object({ session: z.string(), at: z.number() })) }) },
   unstop: { input: z.object({ session: z.string().max(100) }), output: z.object({ ok: z.boolean() }) },
   /** Runs AppleScript through the «BB Automation» helper so macOS names it, not the BB host, in Automation prompts. */
   applescript: {
-    input: z.object({ script: z.string().min(1).max(50_000), timeoutMs: z.number().int().min(1000).max(300_000), display: z.object({ title: z.string().max(200), step: z.string().max(200), session: z.string().max(100), theme: z.enum(['dark', 'light', 'accent']).default('dark') }).nullable() }),
+    input: z.object({ script: z.string().min(1).max(50_000), timeoutMs: z.number().int().min(1000).max(300_000), display: z.object({ title: z.string().max(200), step: z.string().max(200), session: z.string().max(100), label: z.string().max(80).optional(), theme: z.enum(['dark', 'light', 'accent']).default('dark') }).nullable() }),
     output: z.object({ ok: z.boolean(), text: z.string(), timedOut: z.boolean() }),
   },
   /** Salted SHA-256 of the Mac hardware UUID: a stable, non-reversible machine trait for rebinding access after a BB reinstall. */

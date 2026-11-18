@@ -234,7 +234,7 @@ const STOP_REQUEST = join(OVERLAY_DIR, 'stop-request.json');
 const STOPPED = join(OVERLAY_DIR, 'stopped-sessions.json');
 const STOP_TTL_MS = 12 * 3600_000;
 
-type Caption = { title: string; step: string; session: string };
+type Caption = { title: string; step: string; session: string; label?: string };
 
 async function readStopped(): Promise<Record<string, number>> {
   try {
@@ -262,7 +262,8 @@ async function collectStops(): Promise<Record<string, number>> {
 }
 
 type Point = { x: number; y: number };
-type OverlayOpts = { theme: string; move?: Point | null; halo?: boolean; avoid?: { x: number; y: number; w: number; h: number } | null };
+type OverlayOpts = { theme: string; move?: Point | null; halo?: boolean; avoid?: { x: number; y: number; w: number; h: number } | null; count?: boolean };
+const progress = new Map<string, { n: number; startedAt: number }>();
 
 /** One overlay process at a time: the pid file owner, started by this host worker (it exits when the worker dies). */
 async function ensureOverlay(): Promise<void> {
@@ -293,8 +294,11 @@ async function ensureOverlay(): Promise<void> {
 async function showOverlay(caption: Caption, pos: Point | null, ttlMs: number, opts: OverlayOpts): Promise<void> {
   await mkdir(OVERLAY_DIR, { recursive: true });
   const seq = ++overlaySeq;
+  const pr = progress.get(caption.session) ?? { n: 0, startedAt: Date.now() };
+  if (opts.count) pr.n++;
+  progress.set(caption.session, pr);
   const tmp = `${OVERLAY_STATE}.tmp`;
-  await writeFile(tmp, JSON.stringify({ seq, ...caption, x: pos?.x ?? null, y: pos?.y ?? null, ttlMs, theme: opts.theme, halo: opts.halo !== false, avoid: opts.avoid ?? null, move: opts.move ? { ...opts.move, ms: 380 } : null }));
+  await writeFile(tmp, JSON.stringify({ seq, ...caption, label: caption.label ?? 'BB', n: pr.n, startedAt: pr.startedAt, x: pos?.x ?? null, y: pos?.y ?? null, ttlMs, theme: opts.theme, move: opts.move ? { ...opts.move, ms: 450 } : null }));
   await rename(tmp, OVERLAY_STATE);
   await ensureOverlay();
   if (!opts.move) return;
@@ -303,6 +307,15 @@ async function showOverlay(caption: Caption, pos: Point | null, ttlMs: number, o
     try { if ((JSON.parse(await readFile(MOVE_ACK, 'utf8')) as { seq?: number }).seq === seq) return; } catch { /* not yet */ }
     await new Promise(r => setTimeout(r, 40));
   }
+}
+
+/** Session finished (turn ended, failed, thread archived): the HUD shows «Готово» and hides. */
+async function endOverlay(session: string): Promise<void> {
+  if (!progress.has(session)) return;
+  progress.delete(session);
+  const tmp = `${OVERLAY_STATE}.tmp`;
+  await writeFile(tmp, JSON.stringify({ seq: ++overlaySeq, end: true, session }));
+  await rename(tmp, OVERLAY_STATE);
 }
 
 const geometry = new Geometry();
@@ -419,7 +432,7 @@ export default experimental_defineHostEntry({
       const realMouse = visible && !!display?.realMouse;
       // The driver's own agent cursor is only useful when the real pointer stays put.
       if (session) await prepareCursor(driver, session, visible && !realMouse).catch(() => undefined);
-      const caption: Caption | null = visible ? { title: display!.title, step: display!.step, session: session! } : null;
+      const caption: Caption | null = visible ? { title: display!.title, step: display!.step, session: session!, label: display!.label } : null;
       const opts: OverlayOpts = { theme: display?.theme ?? 'dark' };
       // Window snapshots: ask for element frames too (for gliding to a token), hand back only what the agent asked for.
       const agentTree = tool === 'get_window_state' ? input.tree_format : undefined;
@@ -431,7 +444,11 @@ export default experimental_defineHostEntry({
         if (props.delivery_mode && input.delivery_mode === undefined) input.delivery_mode = 'foreground';
       }
       const avoid = typeof input.element_token === 'string' ? frames.get(input.element_token) ?? null : null;
-      if (caption) await showOverlay(caption, target, 30_000, { ...opts, move: target, avoid }).catch(() => undefined);
+      if (caption) await showOverlay(caption, target, 30_000, { ...opts, move: target, avoid, count: true }).catch(() => undefined);
+      // Visible mode: keep the target app in front so the user sees the action
+      // (a bare foreground delivery would restore the previous app afterwards).
+      if (realMouse && typeof input.pid === 'number' && !['bring_to_front', 'list_apps', 'list_windows', 'launch_app', 'get_window_state', 'get_desktop_state', 'zoom'].includes(tool))
+        await driverJson(driver, 'bring_to_front', { pid: input.pid, ...(session ? { session } : {}) });
       if (display?.foreground && !realMouse && typeof input.pid === 'number' && !['bring_to_front', 'list_apps', 'list_windows', 'launch_app'].includes(tool))
         await driverJson(driver, 'bring_to_front', { pid: input.pid, ...(session ? { session } : {}) });
       const dir = await mkdtemp(join(tmpdir(), 'bb-mac-cu-'));
@@ -499,12 +516,13 @@ export default experimental_defineHostEntry({
       if (process.platform !== 'darwin') throw new Error('Не macOS.');
       if (display) {
         if ((await collectStops())[display.session]) return { ok: false, text: 'STOPPED_BY_USER: пользователь нажал «Остановить агента» на этом Mac.', timedOut: false };
-        await showOverlay(display, null, timeoutMs, { theme: display.theme ?? 'dark', halo: false }).catch(() => undefined);
+        await showOverlay(display, null, timeoutMs, { theme: display.theme ?? 'dark', count: true }).catch(() => undefined);
       }
       const r = await runAppleScript(script, timeoutMs);
-      if (display) await showOverlay(display, null, 4000, { theme: display.theme ?? 'dark', halo: false }).catch(() => undefined);
+      if (display) await showOverlay(display, null, 4000, { theme: display.theme ?? 'dark' }).catch(() => undefined);
       return r;
     },
+    endSession: async ({ session }) => { await endOverlay(session).catch(() => undefined); return { ok: true }; },
     stopped: async () => ({ sessions: Object.entries(await collectStops()).map(([session, at]) => ({ session, at })) }),
     unstop: async ({ session }) => {
       const all = await collectStops();

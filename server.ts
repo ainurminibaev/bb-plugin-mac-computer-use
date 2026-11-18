@@ -145,7 +145,9 @@ export default function plugin(bb: BbPluginApi) {
     const { overlayTheme } = await settings.get();
     const theme = (['dark', 'light', 'accent'].includes(String(overlayTheme)) ? overlayTheme : 'dark') as 'dark' | 'light' | 'accent';
     // Real pointer only when coordinate mouse input is allowed for this computer.
-    const display = { show: policy.showActions, foreground: policy.foreground, realMouse: policy.realMouse && policy.pointer && policy.input, theme, ...lines };
+    const agentLabel = `BB · ${(await agentName(threadId)) || 'агент'}`.slice(0, 60);
+    activeHosts(threadId).add(target.id);
+    const display = { show: policy.showActions, foreground: policy.foreground, realMouse: policy.realMouse && policy.pointer && policy.input, theme, label: agentLabel, ...lines };
     // Pictures cost the most: return one only for the desktop, a zoom, or a window snapshot that asked for it.
     const wantImage = policy.screen && (tool === 'get_desktop_state' || tool === 'zoom' || (tool === 'get_window_state' && args.include_screenshot !== false));
     const r = await host.call('call', { tool, args: JSON.stringify(args), session, wantImage, maxImageWidth: Number(maxImageWidth) || 1568, display }, { hostId: target.id, timeoutMs: 180_000 });
@@ -165,6 +167,20 @@ export default function plugin(bb: BbPluginApi) {
     if (saved) return saved;
     try { return ((await bb.sdk.threads.get({ threadId }) as { title?: string | null }).title ?? '').replace(/\s+/g, ' ').trim().slice(0, 100); } catch { return ''; }
   }
+
+  // Threads that acted on a Mac in their current session: the HUD there closes when the turn ends.
+  const threadHosts = new Map<string, Set<string>>();
+  const activeHosts = (threadId: string) => { let s = threadHosts.get(threadId); if (!s) { s = new Set(); threadHosts.set(threadId, s); } return s; };
+  const endSessions = async (threadId: string) => {
+    const hosts = threadHosts.get(threadId);
+    if (!hosts) return;
+    threadHosts.delete(threadId);
+    const session = `bb-${threadId}`.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 64);
+    await Promise.all([...hosts].map(h => host.call('endSession', { session }, { hostId: h }).catch(() => undefined)));
+  };
+  bb.events.on('thread.idle', ({ thread }) => { void endSessions(thread.id); });
+  bb.events.on('thread.failed', ({ thread }) => { void endSessions(thread.id); });
+  bb.events.on('thread.archived', ({ thread }) => { void endSessions(thread.id); });
 
   const names = new Map<string, string>();
   /** Human name for the caption: the thread's project, else the thread title. */
@@ -207,7 +223,9 @@ export default function plugin(bb: BbPluginApi) {
       const timeoutMs = timeout_s * 1000;
       const { overlayTheme } = await settings.get();
       const theme = (['dark', 'light', 'accent'].includes(String(overlayTheme)) ? overlayTheme : 'dark') as 'dark' | 'light' | 'accent';
-      const r = await host.call('applescript', { script, timeoutMs, display: policy.showActions ? { ...lines, session, theme } : null }, { hostId: target.id, timeoutMs: timeoutMs + 30_000 });
+      activeHosts(threadId).add(target.id);
+      const label = `BB · ${(await agentName(threadId)) || 'агент'}`.slice(0, 60);
+      const r = await host.call('applescript', { script, timeoutMs, display: policy.showActions ? { ...lines, session, theme, label } : null }, { hostId: target.id, timeoutMs: timeoutMs + 30_000 });
       if (r.text.startsWith('STOPPED_BY_USER')) {
         await journal({ machine: target.name, threadId, tool: 'applescript', why, result: 'остановлено пользователем' });
         return fail(`[${target.name}] Пользователь нажал «Остановить агента» на Mac: доступ этого треда отозван. Не повторяй и не обходи остановку.`);
