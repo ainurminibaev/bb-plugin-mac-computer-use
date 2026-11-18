@@ -33,6 +33,7 @@ export default function plugin(bb: BbPluginApi) {
       default: '{"machines":{}}',
     },
     deniedTools: { type: 'string', label: 'Запрещённые инструменты Cua Driver (через запятую)', default: DEFAULT_DENY },
+    overlayTheme: { type: 'select', label: 'Оформление плашки на Mac', options: ['dark', 'light', 'accent'], experimental_optionLabels: { dark: 'Тёмное (по умолчанию)', light: 'Светлое', accent: 'Синее' }, default: 'dark' },
     maxImageWidth: { type: 'number', label: 'Максимальная ширина снимка экрана для агента, px', experimental_schema: z.number().int().min(480).max(4096), default: 1568 },
   });
   const host = bb.hosts.experimental_client({ contract: hostContract });
@@ -141,8 +142,13 @@ export default function plugin(bb: BbPluginApi) {
     const appName = apps[0]?.name ?? (typeof args.app === 'string' ? args.app : null) ?? (decision.launchTarget ?? null);
     if (goal) await bb.storage.kv.set(`goal:${threadId}`, goal).catch(() => undefined);
     const lines = caption(await agentName(threadId), await goalOf(threadId), tool, step, appName);
-    const display = { show: policy.showActions, foreground: policy.foreground, ...lines };
-    const r = await host.call('call', { tool, args: JSON.stringify(args), session, wantImage: policy.screen, maxImageWidth: Number(maxImageWidth) || 1568, display }, { hostId: target.id, timeoutMs: 180_000 });
+    const { overlayTheme } = await settings.get();
+    const theme = (['dark', 'light', 'accent'].includes(String(overlayTheme)) ? overlayTheme : 'dark') as 'dark' | 'light' | 'accent';
+    // Real pointer only when coordinate mouse input is allowed for this computer.
+    const display = { show: policy.showActions, foreground: policy.foreground, realMouse: policy.realMouse && policy.pointer && policy.input, theme, ...lines };
+    // Pictures cost the most: return one only for the desktop, a zoom, or a window snapshot that asked for it.
+    const wantImage = policy.screen && (tool === 'get_desktop_state' || tool === 'zoom' || (tool === 'get_window_state' && args.include_screenshot !== false));
+    const r = await host.call('call', { tool, args: JSON.stringify(args), session, wantImage, maxImageWidth: Number(maxImageWidth) || 1568, display }, { hostId: target.id, timeoutMs: 180_000 });
     if (r.text.startsWith('STOPPED_BY_USER')) {
       await journal({ machine: target.name, threadId, tool, why, result: 'остановлено пользователем' });
       return fail(`[${target.name}] Пользователь нажал «Остановить агента» на Mac: GUI-доступ для этого треда отозван. Не повторяй GUI-действия и не обходи остановку; сообщи пользователю и жди его решения (снять остановку можно в настройках плагина).`);
@@ -199,7 +205,9 @@ export default function plugin(bb: BbPluginApi) {
       const session = `bb-${threadId}`.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 64);
       const lines = caption(await agentName(threadId), await goalOf(threadId), 'applescript', step ?? `управляет ${targets.join(', ') || 'приложением'} через AppleScript`, null);
       const timeoutMs = timeout_s * 1000;
-      const r = await host.call('applescript', { script, timeoutMs, display: policy.showActions ? { ...lines, session } : null }, { hostId: target.id, timeoutMs: timeoutMs + 30_000 });
+      const { overlayTheme } = await settings.get();
+      const theme = (['dark', 'light', 'accent'].includes(String(overlayTheme)) ? overlayTheme : 'dark') as 'dark' | 'light' | 'accent';
+      const r = await host.call('applescript', { script, timeoutMs, display: policy.showActions ? { ...lines, session, theme } : null }, { hostId: target.id, timeoutMs: timeoutMs + 30_000 });
       if (r.text.startsWith('STOPPED_BY_USER')) {
         await journal({ machine: target.name, threadId, tool: 'applescript', why, result: 'остановлено пользователем' });
         return fail(`[${target.name}] Пользователь нажал «Остановить агента» на Mac: доступ этого треда отозван. Не повторяй и не обходи остановку.`);
@@ -211,20 +219,21 @@ export default function plugin(bb: BbPluginApi) {
 
   bb.agents.registerTool({
     name: 'mac_screenshot',
-    description: 'GUI-уровень (последняя ступень после командной строки и скриптовых интерфейсов). Снимок экрана подключённого Mac. Без pid — весь основной дисплей (get_desktop_state). С pid и window_id — одно окно: дерево доступности (element_token = snapshot_id:номер) + скриншот (get_window_state). Возвращает картинку.',
+    description: 'GUI-уровень (последняя ступень). Без pid — снимок всего экрана (дорого, только если иначе никак). С pid+window_id — дерево элементов окна с element_token, картинка окна только при image:true. Снимок экрана подключённого Mac. Без pid — весь основной дисплей (get_desktop_state). С pid и window_id — одно окно: дерево доступности (element_token = snapshot_id:номер) + скриншот (get_window_state). Возвращает картинку.',
     instructions: `${LADDER} Подробности — навык mac-computer-use. Действия, которые отправляют сообщения, покупают, удаляют или публикуют, — только после явного подтверждения пользователя.`,
     presentation: { label: { pending: 'Смотрю экран Mac', completed: 'Снимок экрана Mac' }, icon: { glyph: 'Monitor' } },
     parameters: z.object({
       machine: machineParam,
       pid: z.number().int().positive().optional().describe('PID приложения (из mac_action list_apps / list_windows).'),
       window_id: z.number().int().positive().optional().describe('ID окна (из list_windows); вместе с pid.'),
+      image: z.boolean().default(false).describe('Для окна: вернуть ещё и картинку. По умолчанию только дерево элементов — дешевле; картинка нужна для холстов/видео и кликов по x,y.'),
       why_gui: whyParam,
       step: stepParam,
       goal: goalParam,
     }),
-    async execute({ machine, pid, window_id, why_gui, step, goal }, { threadId }) {
+    async execute({ machine, pid, window_id, image, why_gui, step, goal }, { threadId }) {
       const tool = pid !== undefined ? 'get_window_state' : 'get_desktop_state';
-      const args = pid !== undefined ? { pid, ...(window_id !== undefined ? { window_id } : {}) } : {};
+      const args = pid !== undefined ? { pid, ...(window_id !== undefined ? { window_id } : {}), include_screenshot: !!image, ...(image ? { max_image_dimension: 1024 } : {}) } : {};
       return guardedCall(machine, threadId, tool, args, why_gui, step, goal);
     },
   });

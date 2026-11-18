@@ -29,6 +29,8 @@
     "components",
     "lib",
     "hooks",
-    "overlay-script.ts"
+    "overlay-script.ts",
+    "geometry.ts",
+    "automation-applet.ts"
   ]
 }

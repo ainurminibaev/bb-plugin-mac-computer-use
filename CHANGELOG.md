@@ -2,6 +2,20 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/), versions: [SemVer](https://semver.org/). Git tags: `vX.Y.Z`.
 
+## [0.4.0] — 2026-11-18
+
+### Added
+- Visible mode v2: the **real pointer** glides to each action point before the action (`delivery_mode: "foreground"`), with a small soft halo that rides on the pointer.
+- Compact translucent two-line caption (goal / current step) with a small Stop button; smart placement never covers the action target; dark (default), light and accent themes (setting «Оформление плашки»).
+- Per-computer «Don't touch my mouse»: background delivery with the driver's own cursor.
+- `mac_screenshot` for a window returns the element tree only; a downscaled window picture only with `image: true`. Skill: «picture only when needed» order.
+
+### Changed
+- Overlay is one process at most (pid file), event-driven: it exits ~8 s after hiding, when its parent host worker dies, or when replaced; leftover 0.3.x overlay processes are stopped.
+
+### Fixed
+- The driver's agent cursor glow from 0.3.2 only appeared during the driver's own pointer animations and was easy to miss; v2 highlights the real pointer instead.
+
 ## [0.3.6] — 2026-11-18
 
 ### Added

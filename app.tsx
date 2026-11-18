@@ -76,7 +76,7 @@ function MacCard({ m, latest, rpc, reload }: { m: MachineView; latest: string | 
         <Toggle checked={m.policy.input} disabled={!!busy || !m.policy.enabled} label="Действия в приложениях" hint="Нажатия кнопок и меню, ввод текста, клавиши, запуск приложений — через Accessibility." onChange={v => save({ input: v })} />
         <div className="ml-6"><Toggle checked={m.policy.pointer} disabled={!!busy || !m.policy.enabled || !m.policy.input} label="Мышь по координатам" hint="Клики и перетаскивание по точке экрана, движение курсора, вывод окна на передний план. Выключите, чтобы агенты работали только через элементы интерфейса." onChange={v => save({ pointer: v })} /></div>
         <Toggle checked={m.policy.showActions} disabled={!!busy || !m.policy.enabled} label="Показывать действия агента на экране" hint="Подсвеченный курсор агента и плашка: цель («BB · агент — Цель: …») и текущий шаг, с кнопкой «Остановить агента». Поверх всех окон, гаснет через несколько секунд, фокус не забирает." onChange={v => save({ showActions: v })} />
-        <Toggle checked={m.policy.foreground} disabled={!!busy || !m.policy.enabled || !m.policy.input} label="Выводить окно на передний план" hint="Перед действием активировать окно приложения. По умолчанию выключено: агент работает в фоне и не мешает." onChange={v => save({ foreground: v })} />
+        <Toggle checked={!m.policy.realMouse} disabled={!!busy || !m.policy.enabled || !m.policy.input} label="Не трогать мою мышь" hint="Выключено (по умолчанию): при показе действий настоящий курсор плавно подлетает к точке действия, окно выходит вперёд. Включено: агент работает в фоне своим курсором, ваш курсор и фокус не трогаются." onChange={v => save({ realMouse: !v })} />
         <div className="py-1 text-sm">
           <span className="font-medium">Только эти приложения</span>
           <span className="block text-xs text-muted-foreground">Bundle ID или имя через запятую, например com.apple.TextEdit, Notes. Пусто — все приложения. Со списком снимок всего экрана недоступен.</span>
@@ -147,7 +147,7 @@ function Wizard({ m, latest, rpc, reload, onClose }: { m: MachineView; latest: s
         <Toggle checked={input} label="Действия в приложениях (Accessibility)" onChange={setInput} />
         <Toggle checked={pointer && input} disabled={!input} label="Мышь по координатам" onChange={setPointer} />
         <Input value={apps} placeholder="Только эти приложения (через запятую), пусто — все" onChange={e => setApps(e.target.value)} className="h-8" />
-        <Button size="sm" disabled={!!busy} onClick={() => run('policy', async () => { await rpc.call('setPolicy', { hostId: m.id, policy: { enabled: true, screen, input, pointer: pointer && input, showActions: true, foreground: false, apps: apps.split(',').map(x => x.trim()).filter(Boolean) } }); })}>Выдать доступ</Button>
+        <Button size="sm" disabled={!!busy} onClick={() => run('policy', async () => { await rpc.call('setPolicy', { hostId: m.id, policy: { enabled: true, screen, input, pointer: pointer && input, showActions: true, realMouse: true, foreground: false, apps: apps.split(',').map(x => x.trim()).filter(Boolean) } }); })}>Выдать доступ</Button>
       </Step>
       <Step n={5} title="Проверить связь" done={!!shot} active={granted}>
         <Button size="sm" disabled={!!busy} onClick={() => run('check', async () => { const r = await rpc.call('check', { hostId: m.id }); setShot(r.image ? `data:${r.image.mimeType};base64,${r.image.data}` : null); return r.message; })}>{busy === 'check' ? 'Проверяю…' : 'Проверить'}</Button>

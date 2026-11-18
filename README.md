@@ -23,7 +23,7 @@ Agent sessions fix their tool list at start. A session that began before the plu
 
 ## Visible mode
 
-While an agent works, the Mac shows it: the driver's agent cursor is highlighted (glow, click ripple) and a blue two-line caption appears next to it — «BB · <project> — Goal: <goal>» and «Now: <step>» — fading out after a few seconds. The caption is a non-activating overlay above all windows; it never takes focus. Agents pass a `goal` once per thread (default: the thread title) and a short `step` per action (default: built from the tool and app).
+While an agent works, the Mac shows it: the **real pointer** glides to each action point (~0.4 s) with a small soft halo, and a compact translucent caption next to it reads «BB · <project> — Goal: <goal>» / «Now: <step>». The caption never covers the action target (below-right of the pointer, flipped at screen edges, or just outside a large text area) and fades ~4 s after the last action. It is a non-activating overlay that never takes focus; one process at most, started on demand, it exits when idle or when its parent dies. «Don't touch my mouse» switches to background delivery with the driver's own cursor. Themes: dark (default), light, accent. Agents pass a `goal` once per thread (default: the thread title) and a short `step` per action (default: built from the tool and app).
 
 The caption has a **Stop agent** button: one click revokes GUI access for that thread's session at once; its further GUI calls are refused until the user clicks «Allow again» in Settings (or 12 hours pass). No global hotkey is registered, because it would need an extra macOS Input Monitoring permission; the button and the per-computer switch cover this. Per computer: «Show agent actions» (on by default) and «Bring window to front» (off by default — background work stays the norm).
 
@@ -55,7 +55,7 @@ Each access entry stores, besides the BB host ID, stable machine traits: the BB 
 ## Install
 
 ```sh
-bb plugin install git:https://github.com/ainurminibaev/bb-plugin-mac-computer-use.git@^0.3.6
+bb plugin install git:https://github.com/ainurminibaev/bb-plugin-mac-computer-use.git@^0.4.0
 ```
 
 Then open Settings → Mac Computer Use, install Cua Driver on your Mac, grant the two permissions on the Mac (System Settings → Privacy & Security → Accessibility and Screen & System Audio Recording → CuaDriver), enable access and run the connection check. Agent tools appear in new agent sessions.

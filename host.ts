@@ -6,6 +6,7 @@ import { arch, homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { hostContract, type CallResult } from './contract';
 import { OVERLAY_JXA } from './overlay-script';
+import { Geometry } from './geometry';
 import { APPLET_BUNDLE_ID, APPLET_NAME, APPLET_SOURCE, APPLET_VERSION } from './automation-applet';
 import { createHash, randomUUID } from 'node:crypto';
 
@@ -218,10 +219,12 @@ async function install(version: string, teamId: string): Promise<{ ok: boolean; 
 // ---- Visible mode: driver agent cursor + caption overlay ----
 
 const OVERLAY_DIR = join(homedir(), 'Library/Application Support/bb-mac-computer-use');
-const OVERLAY_SCRIPT = join(OVERLAY_DIR, 'overlay.jxa.js');
+const OVERLAY_SCRIPT = join(OVERLAY_DIR, 'overlay2.jxa.js');
 const OVERLAY_STATE = join(OVERLAY_DIR, 'overlay-state.json');
-let overlayPid: number | null = null;
+const OVERLAY_PID = join(OVERLAY_DIR, 'overlay.pid');
+const MOVE_ACK = join(OVERLAY_DIR, 'move-ack.json');
 let overlaySeq = Date.now();
+let legacyCleaned = false;
 const cursorReady = new Set<string>();
 const lastPos = new Map<string, { x: number; y: number }>();
 
@@ -258,21 +261,56 @@ async function collectStops(): Promise<Record<string, number>> {
   return all;
 }
 
-/** Writes the caption state; the overlay process picks it up within 0.1 s. */
-async function showOverlay(caption: Caption, pos: { x: number; y: number } | null, ttlMs = 6000): Promise<void> {
-  await mkdir(OVERLAY_DIR, { recursive: true });
-  const tmp = `${OVERLAY_STATE}.tmp`;
-  await writeFile(tmp, JSON.stringify({ seq: ++overlaySeq, ...caption, x: pos?.x ?? null, y: pos?.y ?? null, ttlMs }));
-  await rename(tmp, OVERLAY_STATE);
-  if (alive(overlayPid)) return;
+type Point = { x: number; y: number };
+type OverlayOpts = { theme: string; move?: Point | null; halo?: boolean; avoid?: { x: number; y: number; w: number; h: number } | null };
+
+/** One overlay process at a time: the pid file owner, started by this host worker (it exits when the worker dies). */
+async function ensureOverlay(): Promise<void> {
+  if (!legacyCleaned) {
+    legacyCleaned = true;
+    // Overlays from 0.3.x had no pid file and could linger; stop them once.
+    const old = await run('/usr/bin/pgrep', ['-f', 'bb-mac-computer-use/overlay.jxa.js'], 5000);
+    for (const pid of old.stdout.split(/\s+/).map(Number).filter(Boolean)) { try { process.kill(pid, 'SIGTERM'); } catch { /* gone */ } }
+  }
+  let pid = 0;
+  try { pid = Number((await readFile(OVERLAY_PID, 'utf8')).trim()); } catch { pid = 0; }
+  if (pid && alive(pid)) {
+    const cmd = (await run('/bin/ps', ['-o', 'command=', '-p', String(pid)], 5000)).stdout;
+    if (cmd.includes('overlay2.jxa.js')) return;
+  }
   let current = '';
   try { current = await readFile(OVERLAY_SCRIPT, 'utf8'); } catch { /* first run */ }
   if (current !== OVERLAY_JXA) await writeFile(OVERLAY_SCRIPT, OVERLAY_JXA);
-  // osascript draws a click-through, non-activating panel; it never takes focus.
-  const child = spawn('/usr/bin/osascript', ['-l', 'JavaScript', OVERLAY_SCRIPT, OVERLAY_STATE], { detached: true, stdio: 'ignore' });
+  const child = spawn('/usr/bin/osascript', ['-l', 'JavaScript', OVERLAY_SCRIPT, OVERLAY_STATE, String(process.pid)], { detached: true, stdio: 'ignore' });
   child.unref();
-  overlayPid = child.pid ?? null;
 }
+
+/**
+ * Writes the overlay state (picked up within ~50 ms). With `move`, the overlay
+ * glides the real cursor there first; we wait for its acknowledgement so the
+ * click lands after the cursor arrived.
+ */
+async function showOverlay(caption: Caption, pos: Point | null, ttlMs: number, opts: OverlayOpts): Promise<void> {
+  await mkdir(OVERLAY_DIR, { recursive: true });
+  const seq = ++overlaySeq;
+  const tmp = `${OVERLAY_STATE}.tmp`;
+  await writeFile(tmp, JSON.stringify({ seq, ...caption, x: pos?.x ?? null, y: pos?.y ?? null, ttlMs, theme: opts.theme, halo: opts.halo !== false, avoid: opts.avoid ?? null, move: opts.move ? { ...opts.move, ms: 380 } : null }));
+  await rename(tmp, OVERLAY_STATE);
+  await ensureOverlay();
+  if (!opts.move) return;
+  const until = Date.now() + 2500;
+  while (Date.now() < until) {
+    try { if ((JSON.parse(await readFile(MOVE_ACK, 'utf8')) as { seq?: number }).seq === seq) return; } catch { /* not yet */ }
+    await new Promise(r => setTimeout(r, 40));
+  }
+}
+
+const geometry = new Geometry();
+const frames = geometry.frames;
+const rememberGeometry = (o: Record<string, unknown>) => geometry.remember(o);
+const targetPoint = (tool: string, input: Record<string, unknown>) => geometry.target(tool, input);
+
+const REAL_MOUSE_TOOLS = new Set(['click', 'double_click', 'right_click', 'type_text', 'set_value', 'scroll', 'drag', 'move_cursor']);
 
 async function driverJson(driver: string, tool: string, args: Record<string, unknown>): Promise<Record<string, unknown> | null> {
   const r = await run(driver, ['call', tool, JSON.stringify(args)], 15_000);
@@ -378,10 +416,23 @@ export default experimental_defineHostEntry({
         return { ok: false, exitCode: 75, text: 'STOPPED_BY_USER: пользователь нажал «Остановить агента» на этом Mac; GUI-доступ для этого сеанса отозван.', image: null };
       }
       const visible = !!(display?.show && session);
-      if (session) await prepareCursor(driver, session, visible).catch(() => undefined);
+      const realMouse = visible && !!display?.realMouse;
+      // The driver's own agent cursor is only useful when the real pointer stays put.
+      if (session) await prepareCursor(driver, session, visible && !realMouse).catch(() => undefined);
       const caption: Caption | null = visible ? { title: display!.title, step: display!.step, session: session! } : null;
-      if (caption) await showOverlay(caption, lastPos.get(session!) ?? null, 30_000).catch(() => undefined);
-      if (display?.foreground && typeof input.pid === 'number' && !['bring_to_front', 'list_apps', 'list_windows', 'launch_app'].includes(tool))
+      const opts: OverlayOpts = { theme: display?.theme ?? 'dark' };
+      // Window snapshots: ask for element frames too (for gliding to a token), hand back only what the agent asked for.
+      const agentTree = tool === 'get_window_state' ? input.tree_format : undefined;
+      if (tool === 'get_window_state' && (agentTree === undefined || agentTree === 'markdown')) input.tree_format = 'both';
+      let target: Point | null = null;
+      if (realMouse && REAL_MOUSE_TOOLS.has(tool)) {
+        target = targetPoint(tool, input);
+        const props = (await schemaOf(driver, tool))?.props ?? {};
+        if (props.delivery_mode && input.delivery_mode === undefined) input.delivery_mode = 'foreground';
+      }
+      const avoid = typeof input.element_token === 'string' ? frames.get(input.element_token) ?? null : null;
+      if (caption) await showOverlay(caption, target, 30_000, { ...opts, move: target, avoid }).catch(() => undefined);
+      if (display?.foreground && !realMouse && typeof input.pid === 'number' && !['bring_to_front', 'list_apps', 'list_windows', 'launch_app'].includes(tool))
         await driverJson(driver, 'bring_to_front', { pid: input.pid, ...(session ? { session } : {}) });
       const dir = await mkdtemp(join(tmpdir(), 'bb-mac-cu-'));
       try {
@@ -396,12 +447,22 @@ export default experimental_defineHostEntry({
           r = await run(driver, argv);
         }
         const image = wantImage ? await loadImage(png, dir, maxImageWidth) : null;
-        if (visible) {
-          const pos = (await cursorPosition(driver, session!).catch(() => null)) ?? lastPos.get(session!) ?? null;
-          if (pos) lastPos.set(session!, pos);
-          await showOverlay(caption!, pos, 6000).catch(() => undefined);
+        let text = joinOut(r);
+        if (tool === 'get_window_state' && r.code === 0) {
+          try {
+            const out = JSON.parse(r.stdout) as Record<string, unknown>;
+            rememberGeometry(out);
+            if (agentTree === undefined || agentTree === 'markdown') delete out.elements;
+            text = [JSON.stringify(out, null, 2), r.stderr.trim()].filter(Boolean).join('\n');
+          } catch { /* keep raw text */ }
         }
-        return { ok: r.code === 0, exitCode: r.code, text: clip(joinOut(r)), image };
+        if (visible) {
+          // Real-mouse mode: the halo rides on the real pointer; otherwise sit next to the driver's agent cursor.
+          const pos = realMouse ? target : (await cursorPosition(driver, session!).catch(() => null)) ?? lastPos.get(session!) ?? null;
+          if (pos) lastPos.set(session!, pos);
+          await showOverlay(caption!, pos, 4000, { ...opts, avoid }).catch(() => undefined);
+        }
+        return { ok: r.code === 0, exitCode: r.code, text: clip(text), image };
       } finally {
         await rm(dir, { recursive: true, force: true });
       }
@@ -438,10 +499,10 @@ export default experimental_defineHostEntry({
       if (process.platform !== 'darwin') throw new Error('Не macOS.');
       if (display) {
         if ((await collectStops())[display.session]) return { ok: false, text: 'STOPPED_BY_USER: пользователь нажал «Остановить агента» на этом Mac.', timedOut: false };
-        await showOverlay(display, null, timeoutMs).catch(() => undefined);
+        await showOverlay(display, null, timeoutMs, { theme: display.theme ?? 'dark', halo: false }).catch(() => undefined);
       }
       const r = await runAppleScript(script, timeoutMs);
-      if (display) await showOverlay(display, null, 4000).catch(() => undefined);
+      if (display) await showOverlay(display, null, 4000, { theme: display.theme ?? 'dark', halo: false }).catch(() => undefined);
       return r;
     },
     stopped: async () => ({ sessions: Object.entries(await collectStops()).map(([session, at]) => ({ session, at })) }),

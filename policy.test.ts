@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { appAllowed, bindOrphan, caption, collectPids, decideScript, normName, rebindOrphans, decide, parsePolicy, policyFor, type MachinePolicy } from './policy.ts';
 
-const full: MachinePolicy = { enabled: true, screen: true, input: true, pointer: true, showActions: true, foreground: false, apps: [] };
+const full: MachinePolicy = { enabled: true, screen: true, input: true, pointer: true, showActions: true, realMouse: true, foreground: false, apps: [] };
 
 test('unknown machine is disabled', () => {
   const p = policyFor(parsePolicy('{"machines":{}}'), 'host_x');
@@ -139,4 +139,18 @@ test('existing host keeps its entry; no orphans, no changes', () => {
   const f = { machines: { h1: { ...full, fingerprint: { hw: 'aaaaaaaaaaaaaaaa' } } } };
   const r = rebindOrphans(f, [{ id: 'h1', name: 'Mac', hw: 'aaaaaaaaaaaaaaaa' }]);
   assert.equal(r.rebound.length + r.candidates.length, 0);
+});
+
+test('geometry: token centre and window pixels map to screen points', async () => {
+  const { Geometry } = await import('./geometry.ts');
+  const g = new Geometry();
+  g.remember({ pid: 7, window_id: 9, screenshot_width: 1172, screenshot_height: 976, elements: [
+    { element_token: 's1:0', role: 'AXWindow', frame: { x: 286, y: 209, w: 586, h: 488 } },
+    { element_token: 's1:1', role: 'AXTextArea', frame: { x: 286, y: 309, w: 586, h: 382 } },
+  ] });
+  assert.deepEqual(g.target('type_text', { element_token: 's1:1' }), { x: 579, y: 500 });
+  assert.deepEqual(g.target('click', { pid: 7, window_id: 9, x: 200, y: 100 }), { x: 386, y: 259 });
+  assert.deepEqual(g.target('move_cursor', { x: 10, y: 20 }), { x: 10, y: 20 });
+  assert.equal(g.target('click', { element_token: 'unknown:1' }), null);
+  assert.equal(g.target('click', { pid: 1, window_id: 2, x: 5, y: 5 }), null);
 });

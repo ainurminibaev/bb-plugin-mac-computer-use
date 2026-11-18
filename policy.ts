@@ -11,6 +11,8 @@ export const machinePolicySchema = z.object({
   pointer: z.boolean().default(true),
   /** Visible mode: highlighted agent cursor and a caption «BB · agent: step» on the Mac screen. */
   showActions: z.boolean().default(true),
+  /** Visible mode moves the REAL mouse pointer to each action point (off: «don't touch my mouse», background delivery). */
+  realMouse: z.boolean().default(true),
   /** Bring the target app to the front before acting (off: background work without stealing focus). */
   foreground: z.boolean().default(false),
   /** Allowed apps (bundle id or app name). Empty — every app. */
@@ -25,7 +27,7 @@ export const policyFileSchema = z.object({
 });
 export type PolicyFile = z.infer<typeof policyFileSchema>;
 
-export const DISABLED: MachinePolicy = { enabled: false, screen: true, input: true, pointer: true, showActions: true, foreground: false, apps: [] };
+export const DISABLED: MachinePolicy = { enabled: false, screen: true, input: true, pointer: true, showActions: true, realMouse: true, foreground: false, apps: [] };
 
 export function parsePolicy(raw: string): PolicyFile {
   try { return policyFileSchema.parse(JSON.parse(raw || '{}')); } catch { return { machines: {} }; }
