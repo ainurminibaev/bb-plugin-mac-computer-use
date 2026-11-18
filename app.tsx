@@ -75,7 +75,7 @@ function MacCard({ m, latest, rpc, reload }: { m: MachineView; latest: string | 
         <Toggle checked={m.policy.screen} disabled={!!busy || !m.policy.enabled} label="Видеть экран" hint="Снимки экрана и окон, дерево элементов." onChange={v => save({ screen: v })} />
         <Toggle checked={m.policy.input} disabled={!!busy || !m.policy.enabled} label="Действия в приложениях" hint="Нажатия кнопок и меню, ввод текста, клавиши, запуск приложений — через Accessibility." onChange={v => save({ input: v })} />
         <div className="ml-6"><Toggle checked={m.policy.pointer} disabled={!!busy || !m.policy.enabled || !m.policy.input} label="Мышь по координатам" hint="Клики и перетаскивание по точке экрана, движение курсора, вывод окна на передний план. Выключите, чтобы агенты работали только через элементы интерфейса." onChange={v => save({ pointer: v })} /></div>
-        <Toggle checked={m.policy.showActions} disabled={!!busy || !m.policy.enabled} label="Показывать действия агента на экране" hint="Подсвеченный курсор агента и подпись «BB · агент: что делает» поверх всех окон; исчезает через несколько секунд. Фокус не забирается." onChange={v => save({ showActions: v })} />
+        <Toggle checked={m.policy.showActions} disabled={!!busy || !m.policy.enabled} label="Показывать действия агента на экране" hint="Подсвеченный курсор агента и плашка: цель («BB · агент — Цель: …») и текущий шаг, с кнопкой «Остановить агента». Поверх всех окон, гаснет через несколько секунд, фокус не забирает." onChange={v => save({ showActions: v })} />
         <Toggle checked={m.policy.foreground} disabled={!!busy || !m.policy.enabled || !m.policy.input} label="Выводить окно на передний план" hint="Перед действием активировать окно приложения. По умолчанию выключено: агент работает в фоне и не мешает." onChange={v => save({ foreground: v })} />
         <div className="py-1 text-sm">
           <span className="font-medium">Только эти приложения</span>
@@ -158,6 +158,22 @@ function Wizard({ m, latest, rpc, reload, onClose }: { m: MachineView; latest: s
   </div>;
 }
 
+type Stopped = { hostId: string; machine: string; session: string; threadId: string; title: string; at: number };
+function StoppedAgents({ rpc }: { rpc: Rpc }) {
+  const [list, setList] = useState<Stopped[] | null>(null);
+  const load = useCallback(() => { rpc.call('stopped', null).then(r => setList(r.entries), () => setList([])); }, [rpc]);
+  useEffect(load, [load]);
+  if (!list?.length) return null;
+  return <section className="space-y-2 rounded-lg border border-amber-500/50 p-3 text-sm">
+    <h3 className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Остановлены кнопкой на Mac · {list.length}</h3>
+    {list.map(e => <div key={e.hostId + e.session} className="flex items-center gap-2">
+      <span className="min-w-0 flex-1 truncate">{e.title || e.threadId} <span className="text-xs text-muted-foreground">· {e.machine} · {new Date(e.at).toLocaleString()}</span></span>
+      <Button size="sm" variant="outline" onClick={() => rpc.call('unstop', { hostId: e.hostId, session: e.session }).then(load)}>Разрешить снова</Button>
+    </div>)}
+    <p className="text-xs text-muted-foreground">Остановка действует 12 часов или до «Разрешить снова». Другие треды продолжают работать по настройкам компьютера.</p>
+  </section>;
+}
+
 type Entry = { at: number; machine: string; threadId: string; tool: string; why: string; result: string };
 function Journal({ rpc }: { rpc: Rpc }) {
   const [entries, setEntries] = useState<Entry[] | null>(null);
@@ -216,6 +232,7 @@ function Screen() {
       {!candidates.length && <p className="text-sm text-muted-foreground">Нет других Mac. Подключите Mac к BB (Settings → Machines) — он появится здесь.</p>}
       {others.length > 0 && <p className="text-xs text-muted-foreground">Не Mac или офлайн: {others.map(m => m.name).join(', ')}.</p>}
     </section>}
+    {data && <StoppedAgents rpc={rpc} />}
     {data && <Journal rpc={rpc} />}
   </div>;
 }

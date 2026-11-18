@@ -2,6 +2,13 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/), versions: [SemVer](https://semver.org/). Git tags: `vX.Y.Z`.
 
+## [0.3.3] — 2026-11-18
+
+### Added
+- Two-line caption: «BB · <project> — Goal: <goal>» and «Now: <step>». New `goal` argument (remembered per thread; default: the thread title).
+- «Stop agent» button on the caption: revokes GUI access for that thread's session immediately (12 h or until «Allow again» in Settings); agents get a clear refusal. The button is reachable by mouse and Accessibility (VoiceOver) without taking focus.
+- Settings: list of stopped agents with «Allow again».
+
 ## [0.3.2] — 2026-11-18
 
 ### Added

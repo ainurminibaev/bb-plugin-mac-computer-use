@@ -43,7 +43,7 @@ export const hostContract = defineRpcContract({
       wantImage: z.boolean(),
       maxImageWidth: z.number().int().min(160).max(4096),
       /** Visible mode: agent cursor + caption overlay; optional bring-to-front. */
-      display: z.object({ show: z.boolean(), label: z.string().max(200), foreground: z.boolean() }).nullable().default(null),
+      display: z.object({ show: z.boolean(), title: z.string().max(200), step: z.string().max(200), foreground: z.boolean() }).nullable().default(null),
     }),
     output: callResultSchema,
   },
@@ -60,6 +60,9 @@ export const hostContract = defineRpcContract({
     input: z.object({ version: z.string().regex(/^\d+\.\d+\.\d+$/), teamId: z.string().regex(/^[A-Z0-9]{10}$/) }),
     output: z.object({ ok: z.boolean(), log: z.string() }),
   },
+  /** Sessions the user stopped with the overlay's «Stop agent» button. */
+  stopped: { input: z.null(), output: z.object({ sessions: z.array(z.object({ session: z.string(), at: z.number() })) }) },
+  unstop: { input: z.object({ session: z.string().max(100) }), output: z.object({ ok: z.boolean() }) },
   apps: { input: z.object({ pids: z.array(z.number().int().positive()).max(50) }), output: z.object({ apps: z.array(appSchema) }) },
 });
 
@@ -85,6 +88,8 @@ export const rpcContract = defineRpcContract({
   },
   install: { input: z.object({ hostId: z.string() }), output: z.object({ ok: z.boolean(), log: z.string() }) },
   grant: { input: z.object({ hostId: z.string() }), output: z.object({ started: z.boolean() }) },
+  stopped: { input: z.null(), output: z.object({ entries: z.array(z.object({ hostId: z.string(), machine: z.string(), session: z.string(), threadId: z.string(), title: z.string(), at: z.number() })) }) },
+  unstop: { input: z.object({ hostId: z.string(), session: z.string() }), output: z.object({ ok: z.boolean() }) },
   journal: {
     input: z.null(),
     output: z.object({ entries: z.array(z.object({ at: z.number(), machine: z.string(), threadId: z.string(), tool: z.string(), why: z.string(), result: z.string() })) }),

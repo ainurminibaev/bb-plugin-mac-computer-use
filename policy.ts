@@ -118,8 +118,12 @@ const VERBS: Record<string, string> = {
   run_steps: 'выполняет несколько шагов', run_script: 'выполняет сценарий',
 };
 
-/** Caption shown on the Mac: «BB · <agent>: <step>», with a readable default step. */
-export function caption(agent: string, tool: string, step: string | undefined, app: string | null): string {
-  const what = step?.trim() || `${VERBS[tool] ?? 'работает'}${app ? ` в ${app}` : ''}`;
-  return `BB · ${agent.trim() || 'агент'}: ${what}`.slice(0, 160);
+/** Two-line caption on the Mac: «BB · <agent> — Цель: <goal>» and the current step (readable default by tool and app). */
+export function caption(agent: string, goal: string, tool: string, step: string | undefined, app: string | null): { title: string; step: string } {
+  const who = `BB · ${agent.trim() || 'агент'}`;
+  const g = goal.trim();
+  return {
+    title: (g ? `${who} — Цель: ${g}` : who).slice(0, 160),
+    step: (step?.trim() || `${VERBS[tool] ?? 'работает'}${app ? ` в ${app}` : ''}`).slice(0, 120),
+  };
 }

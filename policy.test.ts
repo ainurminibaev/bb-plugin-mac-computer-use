@@ -82,10 +82,10 @@ test('pointer off: only element actions', () => {
   assert.equal(decide(p, 'get_window_state', { pid: 1 }).ok, true);
 });
 
-test('caption has agent and a default step', () => {
-  assert.equal(caption('Assistant', 'type_text', undefined, 'TextEdit'), 'BB · Assistant: печатает в TextEdit');
-  assert.equal(caption('Assistant', 'click', 'нажимает «Сохранить»', 'TextEdit'), 'BB · Assistant: нажимает «Сохранить»');
-  assert.equal(caption('', 'something_new', undefined, null), 'BB · агент: работает');
+test('caption has agent, goal and a default step', () => {
+  assert.deepEqual(caption('Assistant', 'check the plugin', 'type_text', undefined, 'TextEdit'), { title: 'BB · Assistant — Цель: check the plugin', step: 'печатает в TextEdit' });
+  assert.equal(caption('Assistant', '', 'click', 'нажимает «Сохранить»', null).step, 'нажимает «Сохранить»');
+  assert.deepEqual(caption('', '', 'something_new', undefined, null), { title: 'BB · агент', step: 'работает' });
   assert.equal(parsePolicy('{"machines":{"h":{"enabled":true}}}').machines.h!.showActions, true);
   assert.equal(parsePolicy('{"machines":{"h":{"enabled":true}}}').machines.h!.foreground, false);
 });

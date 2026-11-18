@@ -225,11 +225,42 @@ const lastPos = new Map<string, { x: number; y: number }>();
 
 const alive = (pid: number | null) => { if (!pid) return false; try { process.kill(pid, 0); return true; } catch { return false; } };
 
+const STOP_REQUEST = join(OVERLAY_DIR, 'stop-request.json');
+const STOPPED = join(OVERLAY_DIR, 'stopped-sessions.json');
+const STOP_TTL_MS = 12 * 3600_000;
+
+type Caption = { title: string; step: string; session: string };
+
+async function readStopped(): Promise<Record<string, number>> {
+  try {
+    const all = JSON.parse(await readFile(STOPPED, 'utf8')) as Record<string, number>;
+    return Object.fromEntries(Object.entries(all).filter(([, at]) => Date.now() - at < STOP_TTL_MS));
+  } catch { return {}; }
+}
+
+async function writeStopped(all: Record<string, number>): Promise<void> {
+  await mkdir(OVERLAY_DIR, { recursive: true });
+  await writeFile(`${STOPPED}.tmp`, JSON.stringify(all));
+  await rename(`${STOPPED}.tmp`, STOPPED);
+}
+
+/** Moves a pending «Stop agent» click into the stopped list; returns that list. */
+async function collectStops(): Promise<Record<string, number>> {
+  const all = await readStopped();
+  try {
+    const req = JSON.parse(await readFile(STOP_REQUEST, 'utf8')) as { session?: string; at?: number };
+    await unlink(STOP_REQUEST).catch(() => undefined);
+    if (req.session) all[req.session] = req.at ?? Date.now();
+    await writeStopped(all);
+  } catch { /* no pending click */ }
+  return all;
+}
+
 /** Writes the caption state; the overlay process picks it up within 0.1 s. */
-async function showOverlay(label: string, pos: { x: number; y: number } | null, ttlMs = 6000): Promise<void> {
+async function showOverlay(caption: Caption, pos: { x: number; y: number } | null, ttlMs = 6000): Promise<void> {
   await mkdir(OVERLAY_DIR, { recursive: true });
   const tmp = `${OVERLAY_STATE}.tmp`;
-  await writeFile(tmp, JSON.stringify({ seq: ++overlaySeq, label, x: pos?.x ?? null, y: pos?.y ?? null, ttlMs }));
+  await writeFile(tmp, JSON.stringify({ seq: ++overlaySeq, ...caption, x: pos?.x ?? null, y: pos?.y ?? null, ttlMs }));
   await rename(tmp, OVERLAY_STATE);
   if (alive(overlayPid)) return;
   let current = '';
@@ -281,9 +312,14 @@ export default experimental_defineHostEntry({
       // snapshot (and its element tokens) is gone by the next call.
       if (session && input.session === undefined && (await schemaOf(driver, tool))?.props.session) input.session = session;
       await ensureDaemon(driver);
+      if (session && (await collectStops())[session]) {
+        await prepareCursor(driver, session, false).catch(() => undefined);
+        return { ok: false, exitCode: 75, text: 'STOPPED_BY_USER: пользователь нажал «Остановить агента» на этом Mac; GUI-доступ для этого сеанса отозван.', image: null };
+      }
       const visible = !!(display?.show && session);
       if (session) await prepareCursor(driver, session, visible).catch(() => undefined);
-      if (visible) await showOverlay(display!.label, lastPos.get(session!) ?? null, 30_000).catch(() => undefined);
+      const caption: Caption | null = visible ? { title: display!.title, step: display!.step, session: session! } : null;
+      if (caption) await showOverlay(caption, lastPos.get(session!) ?? null, 30_000).catch(() => undefined);
       if (display?.foreground && typeof input.pid === 'number' && !['bring_to_front', 'list_apps', 'list_windows', 'launch_app'].includes(tool))
         await driverJson(driver, 'bring_to_front', { pid: input.pid, ...(session ? { session } : {}) });
       const dir = await mkdtemp(join(tmpdir(), 'bb-mac-cu-'));
@@ -302,7 +338,7 @@ export default experimental_defineHostEntry({
         if (visible) {
           const pos = (await cursorPosition(driver, session!).catch(() => null)) ?? lastPos.get(session!) ?? null;
           if (pos) lastPos.set(session!, pos);
-          await showOverlay(display!.label, pos, 6000).catch(() => undefined);
+          await showOverlay(caption!, pos, 6000).catch(() => undefined);
         }
         return { ok: r.code === 0, exitCode: r.code, text: clip(joinOut(r)), image };
       } finally {
@@ -337,6 +373,13 @@ export default experimental_defineHostEntry({
       return { started: true };
     },
     install: ({ version, teamId }) => install(version, teamId),
+    stopped: async () => ({ sessions: Object.entries(await collectStops()).map(([session, at]) => ({ session, at })) }),
+    unstop: async ({ session }) => {
+      const all = await collectStops();
+      delete all[session];
+      await writeStopped(all);
+      return { ok: true };
+    },
     apps: async ({ pids }) => ({ apps: await Promise.all(pids.map(appOf)) }),
   },
 });

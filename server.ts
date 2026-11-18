@@ -15,6 +15,8 @@ const whyParam = z.string().trim().min(8).max(300).describe('Обязатель�
 
 const stepParam = z.string().trim().min(2).max(80).optional().describe('Подпись шага на экране Mac для человека, 2–6 слов: «печатает ответ в TextEdit». Без неё — подпись по умолчанию по инструменту.');
 
+const goalParam = z.string().trim().min(3).max(100).optional().describe('Общая цель работы на Mac для человека у экрана: «проверить работу плагина». Задай один раз в начале — она запоминается для треда; по умолчанию — название треда.');
+
 const machineParam = z.string().min(1).max(200).describe('Целевой Mac: ID машины BB (host_…) или её точное имя из `bb machine list`. Указывай явно.');
 
 type ToolResult = { content: ({ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string })[]; isError?: boolean };
@@ -80,7 +82,7 @@ export default function plugin(bb: BbPluginApi) {
   }
 
   /** Policy check + app allowlist + driver call, all in one place for both agent tools. */
-  async function guardedCall(machine: string, threadId: string, tool: string, args: Record<string, unknown>, why: string, step?: string): Promise<ToolResult> {
+  async function guardedCall(machine: string, threadId: string, tool: string, args: Record<string, unknown>, why: string, step?: string, goal?: string): Promise<ToolResult> {
     if (await denied(tool)) return fail(`Инструмент ${tool} запрещён настройкой плагина Mac Computer Use (deniedTools).`);
     const target = await resolveMac(machine);
     const policy = await policyOf(target.id);
@@ -95,12 +97,25 @@ export default function plugin(bb: BbPluginApi) {
     const { maxImageWidth } = await settings.get();
     const session = `bb-${threadId}`.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 64);
     const appName = apps[0]?.name ?? (typeof args.app === 'string' ? args.app : null) ?? (decision.launchTarget ?? null);
-    const display = { show: policy.showActions, foreground: policy.foreground, label: caption(await agentName(threadId), tool, step, appName) };
+    if (goal) await bb.storage.kv.set(`goal:${threadId}`, goal).catch(() => undefined);
+    const lines = caption(await agentName(threadId), await goalOf(threadId), tool, step, appName);
+    const display = { show: policy.showActions, foreground: policy.foreground, ...lines };
     const r = await host.call('call', { tool, args: JSON.stringify(args), session, wantImage: policy.screen, maxImageWidth: Number(maxImageWidth) || 1568, display }, { hostId: target.id, timeoutMs: 180_000 });
+    if (r.text.startsWith('STOPPED_BY_USER')) {
+      await journal({ machine: target.name, threadId, tool, why, result: 'остановлено пользователем' });
+      return fail(`[${target.name}] Пользователь нажал «Остановить агента» на Mac: GUI-доступ для этого треда отозван. Не повторяй GUI-действия и не обходи остановку; сообщи пользователю и жди его решения (снять остановку можно в настройках плагина).`);
+    }
     await journal({ machine: target.name, threadId, tool, why, result: r.ok ? 'ok' : `ошибка ${r.exitCode}` });
     const res = toResult(target, tool, r);
     res.content[0] = { type: 'text', text: `Причина GUI: ${why}\n${(res.content[0] as { text: string }).text}` };
     return res;
+  }
+
+  /** Goal line for the caption: set once per thread by the agent, else the thread title. */
+  async function goalOf(threadId: string): Promise<string> {
+    const saved = await bb.storage.kv.get<string>(`goal:${threadId}`).catch(() => null);
+    if (saved) return saved;
+    try { return ((await bb.sdk.threads.get({ threadId }) as { title?: string | null }).title ?? '').replace(/\s+/g, ' ').trim().slice(0, 100); } catch { return ''; }
   }
 
   const names = new Map<string, string>();
@@ -142,11 +157,12 @@ export default function plugin(bb: BbPluginApi) {
       window_id: z.number().int().positive().optional().describe('ID окна (из list_windows); вместе с pid.'),
       why_gui: whyParam,
       step: stepParam,
+      goal: goalParam,
     }),
-    async execute({ machine, pid, window_id, why_gui, step }, { threadId }) {
+    async execute({ machine, pid, window_id, why_gui, step, goal }, { threadId }) {
       const tool = pid !== undefined ? 'get_window_state' : 'get_desktop_state';
       const args = pid !== undefined ? { pid, ...(window_id !== undefined ? { window_id } : {}) } : {};
-      return guardedCall(machine, threadId, tool, args, why_gui, step);
+      return guardedCall(machine, threadId, tool, args, why_gui, step, goal);
     },
   });
 
@@ -160,9 +176,10 @@ export default function plugin(bb: BbPluginApi) {
       args: z.record(z.string(), z.unknown()).default({}).describe('Аргументы инструмента (JSON-объект).'),
       why_gui: whyParam,
       step: stepParam,
+      goal: goalParam,
     }),
-    async execute({ machine, tool, args, why_gui, step }, { threadId }) {
-      return guardedCall(machine, threadId, tool, args ?? {}, why_gui, step);
+    async execute({ machine, tool, args, why_gui, step, goal }, { threadId }) {
+      return guardedCall(machine, threadId, tool, args ?? {}, why_gui, step, goal);
     },
   });
 
@@ -245,6 +262,22 @@ export default function plugin(bb: BbPluginApi) {
       return host.call('install', { version, teamId: CUA_TEAM_ID }, { hostId, timeoutMs: 600_000 });
     },
     grant: async ({ hostId }) => host.call('grant', null, { hostId }),
+    stopped: async () => {
+      const entries: { hostId: string; machine: string; session: string; threadId: string; title: string; at: number }[] = [];
+      for (const h of (await bb.sdk.hosts.list()).filter(m => m.status === 'connected')) {
+        const info = await host.call('info', null, { hostId: h.id }).catch(() => null);
+        if (info?.platform !== 'darwin' || !info.driver) continue;
+        const { sessions } = await host.call('stopped', null, { hostId: h.id }).catch(() => ({ sessions: [] as { session: string; at: number }[] }));
+        for (const s of sessions) {
+          const threadId = s.session.replace(/^bb-/, '');
+          let title = '';
+          try { title = (await bb.sdk.threads.get({ threadId }) as { title?: string | null }).title ?? ''; } catch { title = ''; }
+          entries.push({ hostId: h.id, machine: h.name, session: s.session, threadId, title, at: s.at });
+        }
+      }
+      return { entries };
+    },
+    unstop: async ({ hostId, session }) => host.call('unstop', { session }, { hostId }),
     journal: async () => ({ entries: ((await bb.storage.kv.get<JournalEntry[]>('journal')) ?? []).slice(0, 30) }),
   });
 }
