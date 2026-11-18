@@ -1,6 +1,6 @@
 import type { BbPluginApi } from '@get-bb/plugin-sdk';
 import { z } from 'zod';
-import { hostContract, rpcContract, type CallResult, type MachineView } from './contract';
+import { agentRpcContract, hostContract, rpcContract, type CallResult, type MachineView } from './contract';
 import { scriptTargets } from './automation-applet';
 import { appAllowed, bindOrphan, caption, collectPids, decide, decideScript, normName, parsePolicy, rebindOrphans, type BindCandidate, type HostTraits, policyFor, policyFileSchema, type MachinePolicy } from './policy';
 export type { rpcContract } from './contract';
@@ -188,6 +188,27 @@ export default function plugin(bb: BbPluginApi) {
     } catch { /* the journal never blocks an action */ }
   }
 
+  /** AppleScript through the «BB Automation» helper, with policy, Stop agent and journal. */
+  async function runScript(machine: string, threadId: string, script: string, why: string, timeout_s: number, step?: string, goal?: string): Promise<ToolResult | string> {
+      const target = await resolveMac(machine);
+      const policy = await policyOf(target.id);
+      const targets = scriptTargets(script);
+      const d = decideScript(policy, targets);
+      if (!d.ok) { await journal({ machine: target.name, threadId, tool: 'applescript', why, result: `отказ: ${d.reason}` }); return fail(`[${target.name}] ${d.reason}`); }
+      if (goal) await bb.storage.kv.set(`goal:${threadId}`, goal).catch(() => undefined);
+      const session = `bb-${threadId}`.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 64);
+      const lines = caption(await agentName(threadId), await goalOf(threadId), 'applescript', step ?? `управляет ${targets.join(', ') || 'приложением'} через AppleScript`, null);
+      const timeoutMs = timeout_s * 1000;
+      const r = await host.call('applescript', { script, timeoutMs, display: policy.showActions ? { ...lines, session } : null }, { hostId: target.id, timeoutMs: timeoutMs + 30_000 });
+      if (r.text.startsWith('STOPPED_BY_USER')) {
+        await journal({ machine: target.name, threadId, tool: 'applescript', why, result: 'остановлено пользователем' });
+        return fail(`[${target.name}] Пользователь нажал «Остановить агента» на Mac: доступ этого треда отозван. Не повторяй и не обходи остановку.`);
+      }
+      await journal({ machine: target.name, threadId, tool: 'applescript', why, result: r.ok ? 'ok' : r.timedOut ? 'нет ответа (ждёт системного запроса?)' : 'ошибка' });
+      const text = `[${target.name}] AppleScript → ${r.ok ? 'ok' : 'ошибка'} (приложения: ${targets.join(', ') || '—'})\n\n${r.text}`;
+      return r.ok ? text : fail(text);
+  }
+
   bb.agents.registerTool({
     name: 'mac_screenshot',
     description: 'GUI-уровень (последняя ступень после командной строки и скриптовых интерфейсов). Снимок экрана подключённого Mac. Без pid — весь основной дисплей (get_desktop_state). С pid и window_id — одно окно: дерево доступности (element_token = snapshot_id:номер) + скриншот (get_window_state). Возвращает картинку.',
@@ -238,23 +259,7 @@ export default function plugin(bb: BbPluginApi) {
       goal: goalParam,
     }),
     async execute({ machine, script, why, timeout_s, step, goal }, { threadId }) {
-      const target = await resolveMac(machine);
-      const policy = await policyOf(target.id);
-      const targets = scriptTargets(script);
-      const d = decideScript(policy, targets);
-      if (!d.ok) { await journal({ machine: target.name, threadId, tool: 'applescript', why, result: `отказ: ${d.reason}` }); return fail(`[${target.name}] ${d.reason}`); }
-      if (goal) await bb.storage.kv.set(`goal:${threadId}`, goal).catch(() => undefined);
-      const session = `bb-${threadId}`.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 64);
-      const lines = caption(await agentName(threadId), await goalOf(threadId), 'applescript', step ?? `управляет ${targets.join(', ') || 'приложением'} через AppleScript`, null);
-      const timeoutMs = (timeout_s ?? 60) * 1000;
-      const r = await host.call('applescript', { script, timeoutMs, display: policy.showActions ? { ...lines, session } : null }, { hostId: target.id, timeoutMs: timeoutMs + 30_000 });
-      if (r.text.startsWith('STOPPED_BY_USER')) {
-        await journal({ machine: target.name, threadId, tool: 'applescript', why, result: 'остановлено пользователем' });
-        return fail(`[${target.name}] Пользователь нажал «Остановить агента» на Mac: доступ этого треда отозван. Не повторяй и не обходи остановку.`);
-      }
-      await journal({ machine: target.name, threadId, tool: 'applescript', why, result: r.ok ? 'ok' : r.timedOut ? 'нет ответа (ждёт системного запроса?)' : 'ошибка' });
-      const text = `[${target.name}] AppleScript → ${r.ok ? 'ok' : 'ошибка'} (приложения: ${targets.join(', ') || '—'})\n\n${r.text}`;
-      return r.ok ? text : fail(text);
+      return runScript(machine, threadId, script, why, timeout_s ?? 60, step, goal);
     },
   });
 
@@ -368,4 +373,36 @@ export default function plugin(bb: BbPluginApi) {
     unstop: async ({ hostId, session }) => host.call('unstop', { session }, { hostId }),
     journal: async () => ({ entries: ((await bb.storage.kv.get<JournalEntry[]>('journal')) ?? []).slice(0, 30) }),
   });
+
+  // ---- Agent fallback via discoverable RPC (sessions without mac_* tools) ----
+
+  async function knownThread(threadId: string): Promise<void> {
+    try { await bb.sdk.threads.get({ threadId }); } catch { throw new Error(`Тред ${threadId} не найден в BB.`); }
+  }
+  const asText = (r: ToolResult | string): { ok: boolean; text: string; image: { mimeType: string; data: string } | null } => {
+    if (typeof r === 'string') return { ok: true, text: r, image: null };
+    const text = r.content.filter((c): c is { type: 'text'; text: string } => c.type === 'text').map(c => c.text).join('\n');
+    const img = r.content.find((c): c is { type: 'image'; data: string; mimeType: string } => c.type === 'image');
+    return { ok: !r.isError, text, image: img ? { mimeType: img.mimeType, data: img.data } : null };
+  };
+
+  bb.rpc.register(agentRpcContract, {
+    agent_status: async ({ threadId, machine }) => {
+      await knownThread(threadId);
+      const target = await resolveMac(machine);
+      const p = await policyOf(target.id);
+      const st = await host.call('status', null, { hostId: target.id });
+      return { ok: true, text: `[${target.name}] доступ: ${p.enabled ? 'включён' : 'выключен'}; экран: ${p.screen ? 'да' : 'нет'}; действия: ${p.input ? 'да' : 'нет'}\n${LADDER}\n${st.text}` };
+    },
+    agent_applescript: async ({ threadId, machine, script, why, timeoutS, step, goal }) => {
+      await knownThread(threadId);
+      const { ok, text } = asText(await runScript(machine, threadId, script, why, timeoutS ?? 60, step, goal));
+      return { ok, text };
+    },
+    agent_action: async ({ threadId, machine, tool, args, whyGui, step, goal }) => {
+      await knownThread(threadId);
+      return asText(await guardedCall(machine, threadId, tool, args ?? {}, whyGui, step, goal));
+    },
+  }, { experimental_discoverable: true, experimental_description: 'Mac Computer Use для агентов без инструментов mac_* (например, старая сессия Codex): те же политика доступа, остановка и журнал. Сначала командная строка, AppleScript — только здесь, а не через osascript в терминале.' });
+
 }

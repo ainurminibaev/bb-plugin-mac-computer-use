@@ -2,6 +2,14 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/), versions: [SemVer](https://semver.org/). Git tags: `vX.Y.Z`.
 
+## [0.3.6] — 2026-11-18
+
+### Added
+- Discoverable agent RPC (`agent_status`, `agent_applescript`, `agent_action`) for sessions that do not list the `mac_*` tools, such as a Codex session started before an update. Same access policy, Stop agent and journal; call with `bb plugin rpc call mac-computer-use <method> --input-file …`.
+
+### Changed
+- The skill no longer suggests calling `cua-driver` or `osascript` from `bb terminal` as a fallback.
+
 ## [0.3.5] — 2026-11-18
 
 ### Added

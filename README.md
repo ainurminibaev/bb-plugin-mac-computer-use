@@ -17,6 +17,10 @@ Agents must not run `osascript` against other apps from `bb terminal`: macOS wou
 
 GUI tools require a `why_gui` argument: the agent states why the command line and scripting were not enough. The settings screen keeps a journal of GUI actions with these reasons. This plugin controls GUI access only; command access through `bb terminal` is governed by BB itself.
 
+## Sessions without the tools
+
+Agent sessions fix their tool list at start. A session that began before the plugin was installed or updated can use the discoverable RPC instead: `bb plugin rpc call mac-computer-use agent_applescript --input-file req.json` (also `agent_action`, `agent_status`), with the same policy, Stop agent and journal.
+
 ## Visible mode
 
 While an agent works, the Mac shows it: the driver's agent cursor is highlighted (glow, click ripple) and a blue two-line caption appears next to it — «BB · <project> — Goal: <goal>» and «Now: <step>» — fading out after a few seconds. The caption is a non-activating overlay above all windows; it never takes focus. Agents pass a `goal` once per thread (default: the thread title) and a short `step` per action (default: built from the tool and app).
@@ -51,7 +55,7 @@ Each access entry stores, besides the BB host ID, stable machine traits: the BB 
 ## Install
 
 ```sh
-bb plugin install git:https://github.com/ainurminibaev/bb-plugin-mac-computer-use.git@^0.3.5
+bb plugin install git:https://github.com/ainurminibaev/bb-plugin-mac-computer-use.git@^0.3.6
 ```
 
 Then open Settings → Mac Computer Use, install Cua Driver on your Mac, grant the two permissions on the Mac (System Settings → Privacy & Security → Accessibility and Screen & System Audio Recording → CuaDriver), enable access and run the connection check. Agent tools appear in new agent sessions.

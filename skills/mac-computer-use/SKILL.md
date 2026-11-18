@@ -144,6 +144,27 @@ GUI-доступ к каждому Mac выдаёт пользователь в 
   этого окна и повтори с новым токеном.
 - Служба Cua Driver запускается автоматически при вызове.
 
-Без инструментов `mac_*` (старая сессия агента): `bb terminal run --machine <mac> --
-~/.local/bin/cua-driver call <tool> '<json с "session":"<имя>">'`; снимок —
-`--screenshot-out-file /tmp/x.png`.
+## Если инструментов `mac_*` в сессии нет
+
+Набор инструментов фиксируется при запуске сессии агента: сессия, начатая до
+установки или обновления плагина (часто — Codex), может не видеть `mac_*`.
+Тогда используй штатный RPC плагина — с той же политикой доступа, кнопкой
+«Остановить агента» и журналом:
+
+```sh
+cat > "$TMPDIR/mac.json" <<'JSON'
+{"threadId": "<$BB_THREAD_ID>", "machine": "<ID или имя Mac>",
+ "script": "tell application \"Finder\" to get name of startup disk",
+ "why": "нужен ответ приложения, CLI и Accessibility его не дают"}
+JSON
+bb plugin rpc call mac-computer-use agent_applescript --input-file "$TMPDIR/mac.json" --json
+```
+
+Методы: `agent_status {threadId, machine}`, `agent_applescript {threadId,
+machine, script, why, timeoutS?, step?, goal?}`, `agent_action {threadId,
+machine, tool, args, whyGui, step?, goal?}` (ответ — текст и, если есть,
+картинка base64). Список: `bb plugin rpc list mac-computer-use`.
+
+Не вызывай `osascript` к приложениям и `cua-driver` напрямую через
+`bb terminal`: это идёт мимо политики и журнала, а AppleScript из терминала
+вызывает системный запрос от «node».

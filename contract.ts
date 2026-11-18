@@ -114,3 +114,41 @@ export const rpcContract = defineRpcContract({
 });
 
 export type CallResult = z.infer<typeof callResultSchema>;
+
+/**
+ * Agent fallback for sessions that do not list the mac_* tools (for example a
+ * Codex session started before an update). Same policy, Stop agent and journal
+ * as the tools: `bb plugin rpc call mac-computer-use agent_applescript --input-file req.json`.
+ */
+const threadIdSchema = z.string().regex(/^thr_[A-Za-z0-9]{4,64}$/).describe('ID треда, от имени которого действие (обычно $BB_THREAD_ID)');
+const textResult = z.object({ ok: z.boolean(), text: z.string() });
+export const agentRpcContract = defineRpcContract({
+  agent_status: {
+    input: z.object({ threadId: threadIdSchema, machine: z.string().min(1).max(200) }),
+    output: textResult,
+  },
+  agent_applescript: {
+    input: z.object({
+      threadId: threadIdSchema,
+      machine: z.string().min(1).max(200),
+      script: z.string().min(1).max(50_000),
+      why: z.string().trim().min(8).max(300),
+      timeoutS: z.number().int().min(1).max(300).default(60),
+      step: z.string().trim().min(2).max(80).optional(),
+      goal: z.string().trim().min(3).max(100).optional(),
+    }),
+    output: textResult,
+  },
+  agent_action: {
+    input: z.object({
+      threadId: threadIdSchema,
+      machine: z.string().min(1).max(200),
+      tool: z.string().regex(/^[a-z][a-z0-9_]{1,63}$/),
+      args: z.record(z.string(), z.unknown()).default({}),
+      whyGui: z.string().trim().min(8).max(300),
+      step: z.string().trim().min(2).max(80).optional(),
+      goal: z.string().trim().min(3).max(100).optional(),
+    }),
+    output: textResult.extend({ image: z.object({ mimeType: z.string(), data: z.string() }).nullable() }),
+  },
+});
