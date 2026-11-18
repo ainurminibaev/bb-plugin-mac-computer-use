@@ -8,9 +8,12 @@
 
 Агенты идут по лестнице и выбирают самую нижнюю ступень, которой хватает:
 
-1. **Командная строка** на Mac через `bb terminal run --machine <mac>`: shell, `open`, `defaults`, `mdfind`, `osascript`, CLI приложений.
-2. **Скриптовые и программные интерфейсы**: словари AppleScript/JXA, `shortcuts run`, URL-схемы и API приложений, действия Accessibility по элементам интерфейса без мыши (`element_token`, `set_value`, `invoke_menu`).
-3. **GUI** — экран, мышь и клавиатура через этот плагин — только если ступени 1–2 не справляются.
+1. **Командная строка без управления другими приложениями** через `bb terminal run --machine <mac>`: shell, `open`, `defaults`, `mdfind`, CLI приложений, файлы документов.
+2. **Действия Accessibility без мыши** через Cua Driver (`element_token`, `set_value`, `invoke_menu`) — без новых системных запросов.
+3. **AppleScript** только через `mac_applescript` и помощника «BB Automation»: macOS спрашивает «"BB Automation" хочет управлять "<приложение>"», а не называет службу BB («node»).
+4. **GUI** — экран, мышь и клавиатура — только если ступени 1–3 не справляются.
+
+Агентам запрещено запускать `osascript` к другим приложениям из `bb terminal`: macOS тогда показывает «"node" хочет управлять …» отдельно для каждого приложения.
 
 GUI-инструменты требуют аргумент `why_gui`: агент объясняет, почему не хватило командной строки и скриптов. На экране настроек ведётся журнал GUI-действий с этими причинами. Плагин управляет только GUI-доступом; командный доступ через `bb terminal` регулирует сам BB.
 
@@ -26,6 +29,7 @@ GUI-инструменты требуют аргумент `why_gui`: агент
 | --- | --- |
 | `mac_screenshot {machine, pid?, window_id?, why_gui, step?, goal?}` | Снимок всего экрана или одного окна с деревом элементов и `snapshot_id`. |
 | `mac_action {machine, tool, args, why_gui, step?, goal?}` | Любой инструмент Cua Driver: `list_windows`, `launch_app`, `click`, `type_text`, `hotkey`, `scroll`, `run_steps`… |
+| `mac_applescript {machine, script, why, timeout_s?}` | AppleScript через помощника «BB Automation» (ступень 3). |
 | `mac_tool_info {machine, tool?}` | Список инструментов, аргументы инструмента или `status` (драйвер, разрешения macOS, выданный доступ). |
 
 `machine` — ID машины BB (`host_…`) или её точное имя. Навык `mac-computer-use` учит агентов циклу «посмотреть → сделать → проверить» и правилам безопасности (отправка, покупка, удаление и публикация — только с подтверждения пользователя; пароли не вводить).
@@ -43,7 +47,7 @@ GUI-инструменты требуют аргумент `why_gui`: агент
 ## Установка
 
 ```sh
-bb plugin install git:https://github.com/ainurminibaev/bb-plugin-mac-computer-use.git@^0.3.3
+bb plugin install git:https://github.com/ainurminibaev/bb-plugin-mac-computer-use.git@^0.3.4
 ```
 
 Затем Settings → Mac Computer Use: установить Cua Driver на Mac, на самом Mac включить два разрешения («Системные настройки → Конфиденциальность и безопасность → Универсальный доступ» и «Запись экрана и системного звука» → CuaDriver), включить доступ и нажать «Проверить связь». Инструменты появляются в новых сессиях агентов.

@@ -127,3 +127,13 @@ export function caption(agent: string, goal: string, tool: string, step: string 
     step: (step?.trim() || `${VERBS[tool] ?? 'работает'}${app ? ` в ${app}` : ''}`).slice(0, 120),
   };
 }
+
+/** AppleScript through the helper: needs in-app actions; with an allowlist every addressed app must be allowed. */
+export function decideScript(policy: MachinePolicy, targets: string[]): { ok: true } | { ok: false; reason: string } {
+  if (!policy.enabled) return { ok: false, reason: 'Доступ агентов к этому компьютеру выключен в настройках плагина Mac Computer Use.' };
+  if (!policy.input) return { ok: false, reason: 'Действия в приложениях на этом компьютере выключены: AppleScript недоступен.' };
+  if (!policy.apps.length) return { ok: true };
+  if (!targets.length) return { ok: false, reason: 'Разрешены только отдельные приложения: в скрипте укажи tell application "<разрешённое>".' };
+  const bad = targets.filter(t => !appAllowed(policy, { bundleId: t, name: t }));
+  return bad.length ? { ok: false, reason: `Приложения не входят в список разрешённых: ${bad.join(', ')}.` } : { ok: true };
+}

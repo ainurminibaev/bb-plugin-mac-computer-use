@@ -6,6 +6,8 @@ import { arch, homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { hostContract, type CallResult } from './contract';
 import { OVERLAY_JXA } from './overlay-script';
+import { APPLET_BUNDLE_ID, APPLET_NAME, APPLET_SOURCE, APPLET_VERSION } from './automation-applet';
+import { randomUUID } from 'node:crypto';
 
 const MAX_TEXT = 60_000;
 const APP = '/Applications/CuaDriver.app';
@@ -294,6 +296,65 @@ async function prepareCursor(driver: string, session: string, show: boolean): Pr
   cursorReady.add(key);
 }
 
+// ---- «BB Automation» helper for AppleScript ----
+
+const APPLET_DIR = join(OVERLAY_DIR, 'automation');
+const APPLET = join(APPLET_DIR, `${APPLET_NAME}.app`);
+
+/** Builds the helper once per source version: osacompile, background app, stable bundle id, ad-hoc signature. */
+async function ensureApplet(): Promise<void> {
+  const marker = join(APPLET_DIR, 'version');
+  try { if ((await readFile(marker, 'utf8')).trim() === APPLET_VERSION) { await access(APPLET); return; } } catch { /* build */ }
+  await mkdir(APPLET_DIR, { recursive: true });
+  const work = await mkdtemp(join(tmpdir(), 'bb-applet-'));
+  try {
+    const src = join(work, 'applet.applescript');
+    await writeFile(src, APPLET_SOURCE);
+    const app = join(work, `${APPLET_NAME}.app`);
+    const steps: [string, string[]][] = [
+      ['/usr/bin/osacompile', ['-o', app, src]],
+      ['/usr/bin/plutil', ['-replace', 'CFBundleIdentifier', '-string', APPLET_BUNDLE_ID, `${app}/Contents/Info.plist`]],
+      ['/usr/bin/plutil', ['-replace', 'CFBundleName', '-string', APPLET_NAME, `${app}/Contents/Info.plist`]],
+      ['/usr/bin/plutil', ['-replace', 'LSUIElement', '-bool', 'true', `${app}/Contents/Info.plist`]],
+      ['/usr/bin/codesign', ['--force', '--deep', '-s', '-', app]],
+    ];
+    for (const [file, args] of steps) {
+      const r = await run(file, args, 60_000);
+      if (r.code !== 0) throw new Error(`Не удалось собрать ${APPLET_NAME}: ${joinOut(r).slice(0, 400)}`);
+    }
+    await rm(APPLET, { recursive: true, force: true });
+    await rename(app, APPLET);
+    await writeFile(marker, APPLET_VERSION);
+  } finally {
+    await rm(work, { recursive: true, force: true });
+  }
+}
+
+async function runAppleScript(script: string, timeoutMs: number): Promise<{ ok: boolean; text: string; timedOut: boolean }> {
+  await ensureApplet();
+  const reqDir = join(APPLET_DIR, 'requests');
+  await mkdir(reqDir, { recursive: true });
+  const req = join(reqDir, `${randomUUID()}.applescript`);
+  const out = `${req}.out`;
+  await writeFile(req, script);
+  try {
+    const launched = await run('/usr/bin/open', ['-g', '-n', '-a', APPLET, '--args', req], 15_000);
+    if (launched.code !== 0) return { ok: false, text: `Не удалось запустить ${APPLET_NAME}: ${joinOut(launched)}`, timedOut: false };
+    const until = Date.now() + timeoutMs;
+    while (Date.now() < until) {
+      try {
+        const text = await readFile(out, 'utf8');
+        const ok = text.startsWith('OK');
+        return { ok, text: clip(text.replace(/^OK\n?/, '')), timedOut: false };
+      } catch { await new Promise(r => setTimeout(r, 200)); }
+    }
+    return { ok: false, text: `Нет ответа за ${Math.round(timeoutMs / 1000)} с. Возможно, на Mac открыт системный запрос «${APPLET_NAME}» хочет управлять приложением — пользователь должен ответить на него, — или скрипт ещё выполняется.`, timedOut: true };
+  } finally {
+    await rm(req, { force: true });
+    await rm(out, { force: true });
+  }
+}
+
 export default experimental_defineHostEntry({
   contract: hostContract,
   handlers: {
@@ -373,6 +434,16 @@ export default experimental_defineHostEntry({
       return { started: true };
     },
     install: ({ version, teamId }) => install(version, teamId),
+    applescript: async ({ script, timeoutMs, display }) => {
+      if (process.platform !== 'darwin') throw new Error('Не macOS.');
+      if (display) {
+        if ((await collectStops())[display.session]) return { ok: false, text: 'STOPPED_BY_USER: пользователь нажал «Остановить агента» на этом Mac.', timedOut: false };
+        await showOverlay(display, null, timeoutMs).catch(() => undefined);
+      }
+      const r = await runAppleScript(script, timeoutMs);
+      if (display) await showOverlay(display, null, 4000).catch(() => undefined);
+      return r;
+    },
     stopped: async () => ({ sessions: Object.entries(await collectStops()).map(([session, at]) => ({ session, at })) }),
     unstop: async ({ session }) => {
       const all = await collectStops();

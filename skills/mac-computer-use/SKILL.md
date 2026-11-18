@@ -1,38 +1,47 @@
 ---
 name: mac-computer-use
-description: Выполнять задачи на Mac пользователя из любого треда BB по лестнице «сначала командная строка, затем скриптовые интерфейсы (AppleScript, Shortcuts, API), GUI — только когда без него никак» — и, когда GUI нужен, видеть экран, кликать, печатать и запускать приложения (computer use через Cua Driver). Применять для любых действий на Mac: в настольных приложениях, настройках, файлах. Не применять для веб-страниц, которые проще открыть через browser-automation.
+description: Выполнять задачи на Mac пользователя из любого треда BB по лестнице «сначала командная строка, затем действия Accessibility и AppleScript через помощника BB Automation, GUI — только когда без него никак» — и, когда GUI нужен, видеть экран, кликать, печатать и запускать приложения (computer use через Cua Driver). Применять для любых действий на Mac: в настольных приложениях, настройках, файлах. Не применять для веб-страниц, которые проще открыть через browser-automation.
 ---
 
 # Управление Mac: сначала командная строка, GUI — последним
 
 ## Лестница (правило владельца)
 
-Выбирай самую нижнюю ступень, которой хватает. GUI — только когда первые две
+Выбирай самую нижнюю ступень, которой хватает. GUI — только когда остальные
 не справляются.
 
-1. **Командная строка** через `bb terminal run --machine <mac> -- bash -lc '…'`:
-   `open -a TextEdit file.txt`, `open "https://…"`, `defaults read/write`,
-   `mdfind`, `ls`/`cp`/`mv`, `pmset`, `networksetup`, `osascript -e '…'`,
-   CLI самих приложений (`code`, `/Applications/…/Contents/MacOS/…`).
-2. **Скриптовые и программные интерфейсы**: AppleScript/JXA по словарю
-   приложения (`osascript -e 'tell application "Notes" to make new note …'`;
-   словарь — `sdef /Applications/Notes.app | head`), `shortcuts list` и
-   `shortcuts run "<имя>"`, URL-схемы, HTTP/API приложений; действия
-   Accessibility по элементам без мыши — `mac_action` с `element_token`,
-   `set_value`, `invoke_menu`, `type_text` по токену.
-3. **GUI** — экран, мышь, клавиатура (`mac_screenshot`, клики по `x,y`,
-   `move_cursor`, `drag`, `delivery_mode: "foreground"`): только если у
-   приложения нет CLI/AppleScript/API или нужно увидеть, что на экране.
+1. **Командная строка без управления другими приложениями** через
+   `bb terminal run --machine <mac> -- bash -lc '…'`: `open -a TextEdit file.txt`,
+   `open "https://…"`, `defaults read/write`, `mdfind`, `ls`/`cp`/`mv`,
+   `pmset`, `networksetup`, CLI самих приложений (`code`, `…/Contents/MacOS/…`),
+   чтение и запись файлов документа напрямую.
+2. **Действия Accessibility без мыши** через Cua Driver — `mac_action` с
+   `element_token`, `set_value`, `invoke_menu`, `type_text` по токену,
+   `run_steps` с адресацией по имени. Разрешение «Универсальный доступ» уже
+   выдано CuaDriver: новых системных запросов не будет.
+3. **AppleScript / словарь приложения** — только инструментом
+   `mac_applescript` (помощник «BB Automation») и только когда ступеней 1–2
+   не хватает. Первое обращение к каждому приложению вызывает системный запрос
+   macOS «"BB Automation" хочет управлять "<App>"». Перед первым таким вызовом
+   предупреди пользователя одной фразой, к какому приложению и зачем.
+4. **GUI** — экран, мышь и клавиатура (`mac_screenshot`, клики по `x,y`,
+   `move_cursor`, `drag`, `delivery_mode: "foreground"`): если нужно увидеть
+   экран или у приложения нет ни CLI, ни элементов Accessibility, ни словаря.
+
+**Не запускай `osascript` / `shortcuts run` к другим приложениям через
+`bb terminal`.** Тогда Apple Events отправляет служба BB, и macOS показывает
+пользователю непонятный запрос «"node" wants access to control "<App>"» —
+отдельно на каждое приложение. `osascript` без обращения к приложениям
+(например, `display notification` или вычисления) допустим.
 
 Перед первым GUI-шагом в задаче коротко напиши пользователю, почему не хватило
-ступеней 1–2 («у приложения нет AppleScript-команды для этой кнопки»). Тот же
-смысл передавай в обязательном параметре `why_gui` инструментов `mac_screenshot`
-и `mac_action`: он виден пользователю в журнале GUI-действий в настройках плагина.
+ступеней 1–3. Тот же смысл передавай в обязательном параметре `why_gui`
+инструментов `mac_screenshot` и `mac_action` (`why` у `mac_applescript`): он
+виден пользователю в журнале действий в настройках плагина.
 
 Особенности: `screencapture` из службы BB даёт чёрный экран — смотреть экран
-только через `mac_screenshot`. AppleScript к приложению при первом обращении
-может вызвать системный запрос «Автоматизация» — тогда остановись и попроси
-пользователя разрешить на Mac.
+только через `mac_screenshot`. Если появился системный запрос macOS, не жми его
+сам: попроси пользователя ответить.
 
 ## Инструменты GUI-уровня
 
@@ -46,6 +55,7 @@ description: Выполнять задачи на Mac пользователя �
 | `mac_screenshot {machine, why_gui}` | Снимок всего экрана (картинка). |
 | `mac_screenshot {machine, pid, window_id, why_gui}` | Окно: дерево элементов `[N] AXRole "имя"` + `snapshot_id` + картинка. |
 | `mac_action {machine, tool, args, why_gui, step?, goal?}` | Любой инструмент Cua Driver: `list_apps`, `list_windows`, `launch_app`, `click`, `type_text`, `press_key`, `hotkey`, `scroll`, `move_cursor`, `set_value`, `invoke_menu`, `run_steps`… |
+| `mac_applescript {machine, script, why, timeout_s?, step?, goal?}` | AppleScript через помощника «BB Automation» (ступень 3). |
 | `mac_tool_info {machine, tool?}` | Короткий список инструментов; аргументы инструмента (`tool: "click"`); `tool: "status"` — служба, разрешения macOS и выданный доступ. |
 
 GUI-доступ к каждому Mac выдаёт пользователь в настройках плагина

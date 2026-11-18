@@ -63,6 +63,11 @@ export const hostContract = defineRpcContract({
   /** Sessions the user stopped with the overlay's «Stop agent» button. */
   stopped: { input: z.null(), output: z.object({ sessions: z.array(z.object({ session: z.string(), at: z.number() })) }) },
   unstop: { input: z.object({ session: z.string().max(100) }), output: z.object({ ok: z.boolean() }) },
+  /** Runs AppleScript through the «BB Automation» helper so macOS names it, not the BB host, in Automation prompts. */
+  applescript: {
+    input: z.object({ script: z.string().min(1).max(50_000), timeoutMs: z.number().int().min(1000).max(300_000), display: z.object({ title: z.string().max(200), step: z.string().max(200), session: z.string().max(100) }).nullable() }),
+    output: z.object({ ok: z.boolean(), text: z.string(), timedOut: z.boolean() }),
+  },
   apps: { input: z.object({ pids: z.array(z.number().int().positive()).max(50) }), output: z.object({ apps: z.array(appSchema) }) },
 });
 

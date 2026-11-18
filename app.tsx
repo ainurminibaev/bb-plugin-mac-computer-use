@@ -136,7 +136,7 @@ function Wizard({ m, latest, rpc, reload, onClose }: { m: MachineView; latest: s
         <Button size="sm" disabled={!!busy || !latest} onClick={() => run('install', async () => (await rpc.call('install', { hostId: m.id })).log)}>{busy === 'install' ? 'Устанавливаю…' : `Установить ${latest ?? ''}`}</Button>
       </Step>
       <Step n={3} title="Разрешения macOS" done={perms} active={driver && !perms}>
-        <p className="text-xs text-muted-foreground">На самом Mac: «Системные настройки → Конфиденциальность и безопасность» → «Универсальный доступ» и «Запись экрана и системного звука» → включите CuaDriver. Если macOS предложит перезапуск — согласитесь.</p>
+        <p className="text-xs text-muted-foreground">На самом Mac: «Системные настройки → Конфиденциальность и безопасность» → «Универсальный доступ» и «Запись экрана и системного звука» → включите CuaDriver. Если macOS предложит перезапуск — согласитесь. Позже могут появляться запросы «"BB Automation" хочет управлять …» — это AppleScript агентов, о них ниже.</p>
         <div className="flex flex-wrap gap-2">
           <Button size="sm" disabled={!!busy} onClick={() => run('grant', async () => { await rpc.call('grant', { hostId: m.id }); return 'Мастер открыт на Mac. Включите переключатели и нажмите «Проверить снова».'; })}>Открыть мастер на Mac</Button>
           <Button size="sm" variant="outline" disabled={!!busy} onClick={reload}>Проверить снова</Button>
@@ -206,7 +206,7 @@ function Screen() {
     <div className="flex items-center justify-between gap-2">
       <div className="space-y-1 text-sm text-muted-foreground">
         <p>Здесь выдаётся GUI-доступ — экран, действия в приложениях, мышь — агентам всех тредов BB (инструменты mac_screenshot, mac_action). Компьютер без доступа закрыт.</p>
-        <p>Правило для агентов: сначала командная строка (bb terminal: shell, open, osascript), затем скриптовые интерфейсы (AppleScript, Shortcuts, API), и только потом GUI — с объяснением причины. Командный доступ через bb terminal этой настройкой не управляется.</p>
+        <p>Правило для агентов: сначала командная строка (bb terminal: shell, open, defaults), затем действия Accessibility без мыши и AppleScript через помощника «BB Automation», и только потом экран и мышь — с объяснением причины. Командный доступ через bb terminal этой настройкой не управляется.</p>
       </div>
       <Button size="sm" variant="ghost" aria-label="Обновить" onClick={reload}><Icon name="RefreshCw" className="size-3.5" /></Button>
     </div>
@@ -232,6 +232,16 @@ function Screen() {
       {!candidates.length && <p className="text-sm text-muted-foreground">Нет других Mac. Подключите Mac к BB (Settings → Machines) — он появится здесь.</p>}
       {others.length > 0 && <p className="text-xs text-muted-foreground">Не Mac или офлайн: {others.map(m => m.name).join(', ')}.</p>}
     </section>}
+    <details className="rounded-lg border border-border p-3 text-sm">
+      <summary className="cursor-pointer font-medium">Системные запросы «… хочет управлять …» на Mac</summary>
+      <div className="mt-2 space-y-1.5 text-muted-foreground">
+        <p>macOS спрашивает отдельно для каждой пары «кто управляет → каким приложением», когда программа отправляет приложению команды AppleScript (Apple Events).</p>
+        <p>«"BB Automation" хочет управлять "…"» — это помощник плагина: агенты используют его для AppleScript и заранее предупреждают. Разрешите, если ожидаете такое действие, иначе — «Не разрешать».</p>
+        <p>«"node" хочет управлять "…"» — это служба BB напрямую (osascript из терминала агента). Агентам теперь запрещено так делать; такой запрос можно отклонить.</p>
+        <p>Изменить решение: Системные настройки → Конфиденциальность и безопасность → Автоматизация → BB Automation или node → переключатели приложений.</p>
+        <p>Экран, мышь и клавиатура работают через CuaDriver («Универсальный доступ» и «Запись экрана») и таких запросов не вызывают.</p>
+      </div>
+    </details>
     {data && <StoppedAgents rpc={rpc} />}
     {data && <Journal rpc={rpc} />}
   </div>;

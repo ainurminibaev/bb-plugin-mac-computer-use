@@ -1,7 +1,8 @@
 import type { BbPluginApi } from '@get-bb/plugin-sdk';
 import { z } from 'zod';
 import { hostContract, rpcContract, type CallResult, type MachineView } from './contract';
-import { appAllowed, caption, collectPids, decide, normName, parsePolicy, policyFor, policyFileSchema, type MachinePolicy } from './policy';
+import { scriptTargets } from './automation-applet';
+import { appAllowed, caption, collectPids, decide, decideScript, normName, parsePolicy, policyFor, policyFileSchema, type MachinePolicy } from './policy';
 export type { rpcContract } from './contract';
 
 /** Developer ID team of Cua AI, Inc.: an install with another signer is refused. */
@@ -10,7 +11,7 @@ const CUA_TEAM_ID = 'YCK386LBJ7';
 const DEFAULT_DENY = 'kill_app,clipboard_read,set_config,install_extension,check_for_update,replay_trajectory,browser_download,browser_set_input_files';
 
 /** The owner's rule: command line first, GUI only when nothing else works. */
-const LADDER = 'Порядок для Mac: 1) командная строка через `bb terminal run --machine <mac>` (shell, open, defaults, osascript/AppleScript, CLI приложений); 2) скриптовые и программные интерфейсы (AppleScript-словари, `shortcuts run`, API приложений, действия Accessibility по element_token без мыши); 3) только если этого недостаточно — экран, мышь и клавиатура через mac_*. Перед GUI коротко объясни пользователю, почему не хватило 1–2.';
+const LADDER = 'Порядок для Mac: 1) командная строка через `bb terminal run --machine <mac>` (shell, open, defaults, CLI приложений) — без osascript к другим приложениям: иначе macOS спросит пользователя про «node»; 2) действия Accessibility без мыши (mac_action по element_token, set_value, invoke_menu) — новых запросов нет; 3) AppleScript только через mac_applescript (помощник «BB Automation», первое обращение к приложению — системный запрос, предупреди пользователя); 4) только если этого недостаточно — экран, мышь и клавиатура через mac_*. Перед GUI коротко объясни пользователю, почему не хватило ступеней 1–3.';
 const whyParam = z.string().trim().min(8).max(300).describe('Обязательно: коротко, почему командной строки и скриптовых интерфейсов недостаточно (например: «нет AppleScript-словаря, нужна кнопка в окне»).');
 
 const stepParam = z.string().trim().min(2).max(80).optional().describe('Подпись шага на экране Mac для человека, 2–6 слов: «печатает ответ в TextEdit». Без неё — подпись по умолчанию по инструменту.');
@@ -180,6 +181,39 @@ export default function plugin(bb: BbPluginApi) {
     }),
     async execute({ machine, tool, args, why_gui, step, goal }, { threadId }) {
       return guardedCall(machine, threadId, tool, args ?? {}, why_gui, step, goal);
+    },
+  });
+
+  bb.agents.registerTool({
+    name: 'mac_applescript',
+    description: 'AppleScript на Mac через помощника «BB Automation» (ступень 3 после командной строки и действий Accessibility). Только когда нужно то, чего нет в командной строке и в mac_action по element_token, — например словарь приложения. Первое обращение к каждому приложению вызывает системный запрос macOS «"BB Automation" хочет управлять …» — заранее предупреди пользователя. Не запускай osascript к приложениям через bb terminal: запрос тогда придёт от «node».',
+    presentation: { label: { pending: 'AppleScript на Mac', completed: 'AppleScript на Mac выполнен' }, icon: { glyph: 'Code' } },
+    parameters: z.object({
+      machine: machineParam,
+      script: z.string().min(1).max(50_000).describe('Текст AppleScript (tell application "…" …). Результат возвращается как текст.'),
+      why: z.string().trim().min(8).max(300).describe('Обязательно: почему не хватило командной строки и действий Accessibility.'),
+      timeout_s: z.number().int().min(1).max(300).default(60).describe('Ожидание результата, с. Если на Mac открыт системный запрос, ждём ответа пользователя.'),
+      step: stepParam,
+      goal: goalParam,
+    }),
+    async execute({ machine, script, why, timeout_s, step, goal }, { threadId }) {
+      const target = await resolveMac(machine);
+      const policy = await policyOf(target.id);
+      const targets = scriptTargets(script);
+      const d = decideScript(policy, targets);
+      if (!d.ok) { await journal({ machine: target.name, threadId, tool: 'applescript', why, result: `отказ: ${d.reason}` }); return fail(`[${target.name}] ${d.reason}`); }
+      if (goal) await bb.storage.kv.set(`goal:${threadId}`, goal).catch(() => undefined);
+      const session = `bb-${threadId}`.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 64);
+      const lines = caption(await agentName(threadId), await goalOf(threadId), 'applescript', step ?? `управляет ${targets.join(', ') || 'приложением'} через AppleScript`, null);
+      const timeoutMs = (timeout_s ?? 60) * 1000;
+      const r = await host.call('applescript', { script, timeoutMs, display: policy.showActions ? { ...lines, session } : null }, { hostId: target.id, timeoutMs: timeoutMs + 30_000 });
+      if (r.text.startsWith('STOPPED_BY_USER')) {
+        await journal({ machine: target.name, threadId, tool: 'applescript', why, result: 'остановлено пользователем' });
+        return fail(`[${target.name}] Пользователь нажал «Остановить агента» на Mac: доступ этого треда отозван. Не повторяй и не обходи остановку.`);
+      }
+      await journal({ machine: target.name, threadId, tool: 'applescript', why, result: r.ok ? 'ok' : r.timedOut ? 'нет ответа (ждёт системного запроса?)' : 'ошибка' });
+      const text = `[${target.name}] AppleScript → ${r.ok ? 'ok' : 'ошибка'} (приложения: ${targets.join(', ') || '—'})\n\n${r.text}`;
+      return r.ok ? text : fail(text);
     },
   });
 

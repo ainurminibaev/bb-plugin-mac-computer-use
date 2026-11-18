@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { appAllowed, caption, collectPids, normName, decide, parsePolicy, policyFor, type MachinePolicy } from './policy.ts';
+import { appAllowed, caption, collectPids, decideScript, normName, decide, parsePolicy, policyFor, type MachinePolicy } from './policy.ts';
 
 const full: MachinePolicy = { enabled: true, screen: true, input: true, pointer: true, showActions: true, foreground: false, apps: [] };
 
@@ -88,4 +88,16 @@ test('caption has agent, goal and a default step', () => {
   assert.deepEqual(caption('', '', 'something_new', undefined, null), { title: 'BB · агент', step: 'работает' });
   assert.equal(parsePolicy('{"machines":{"h":{"enabled":true}}}').machines.h!.showActions, true);
   assert.equal(parsePolicy('{"machines":{"h":{"enabled":true}}}').machines.h!.foreground, false);
+});
+
+test('AppleScript decision and target parsing', async () => {
+  const { scriptTargets } = await import('./automation-applet.ts');
+  assert.deepEqual(scriptTargets('tell application "TextEdit" to count documents\ntell application id "com.apple.Notes" to activate'), ['TextEdit', 'com.apple.Notes']);
+  assert.deepEqual(scriptTargets("Application('Safari').windows()"), ['Safari']);
+  assert.equal(decideScript(full, []).ok, true);
+  assert.equal(decideScript({ ...full, input: false }, ['TextEdit']).ok, false);
+  const p = { ...full, apps: ['TextEdit'] };
+  assert.equal(decideScript(p, []).ok, false);
+  assert.equal(decideScript(p, ['TextEdit']).ok, true);
+  assert.equal(decideScript(p, ['TextEdit', 'Finder']).ok, false);
 });

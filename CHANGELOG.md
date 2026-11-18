@@ -2,6 +2,15 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/), versions: [SemVer](https://semver.org/). Git tags: `vX.Y.Z`.
 
+## [0.3.4] — 2026-11-18
+
+### Added
+- `mac_applescript`: AppleScript runs inside a small ad-hoc signed background helper, «BB Automation» (built on the Mac with `osacompile`), so macOS Automation prompts name it instead of the BB host process ("node"). Respects the per-computer access policy, app allowlist, Stop agent and the action journal.
+- Settings: an explanation of «… wants to control …» prompts and where to change the choice (Privacy & Security → Automation).
+
+### Changed
+- Ladder for agents: command line without driving other apps → Accessibility actions → AppleScript via the helper → GUI. Agents must not run `osascript` against other apps from `bb terminal`.
+
 ## [0.3.3] — 2026-11-18
 
 ### Added

@@ -8,9 +8,12 @@ Lets BB agents in any thread, on any enrolled machine, see a Mac's screen and co
 
 Agents follow a ladder and pick the lowest rung that works:
 
-1. **Command line** on the Mac via `bb terminal run --machine <mac>`: shell, `open`, `defaults`, `mdfind`, `osascript`, app CLIs.
-2. **Scripting and programmatic interfaces**: AppleScript/JXA dictionaries, `shortcuts run`, URL schemes and app APIs, Accessibility actions on UI elements without the mouse (`element_token`, `set_value`, `invoke_menu`).
-3. **GUI** — screen, mouse and keyboard through this plugin — only when rungs 1–2 cannot do the job.
+1. **Command line that does not drive other apps**, via `bb terminal run --machine <mac>`: shell, `open`, `defaults`, `mdfind`, app CLIs, document files.
+2. **Accessibility actions without the mouse** through Cua Driver (`element_token`, `set_value`, `invoke_menu`) — no new macOS prompts.
+3. **AppleScript** only through `mac_applescript` and the «BB Automation» helper, so macOS asks «"BB Automation" wants to control "<App>"» instead of naming the BB host process ("node").
+4. **GUI** — screen, mouse and keyboard — only when rungs 1–3 cannot do the job.
+
+Agents must not run `osascript` against other apps from `bb terminal`: macOS would then show «"node" wants access to control …» for every app.
 
 GUI tools require a `why_gui` argument: the agent states why the command line and scripting were not enough. The settings screen keeps a journal of GUI actions with these reasons. This plugin controls GUI access only; command access through `bb terminal` is governed by BB itself.
 
@@ -26,6 +29,7 @@ The caption has a **Stop agent** button: one click revokes GUI access for that t
 | --- | --- |
 | `mac_screenshot {machine, pid?, window_id?, why_gui, step?, goal?}` | Full-screen screenshot, or one window with its accessibility tree and `snapshot_id`. |
 | `mac_action {machine, tool, args, why_gui, step?, goal?}` | Any Cua Driver tool: `list_windows`, `launch_app`, `click`, `type_text`, `hotkey`, `scroll`, `run_steps`, … |
+| `mac_applescript {machine, script, why, timeout_s?}` | AppleScript through the «BB Automation» helper (rung 3). |
 | `mac_tool_info {machine, tool?}` | Tool list, a tool's arguments, or `status` (driver, macOS permissions, granted access). |
 
 `machine` is a BB machine id (`host_…`) or its exact name. The bundled skill `mac-computer-use` teaches agents the observe → act → verify loop and the safety rules (no sending, buying, deleting or publishing without the user's confirmation; never type passwords).
@@ -43,7 +47,7 @@ A computer that is not listed in the access policy is denied. Tools `kill_app`, 
 ## Install
 
 ```sh
-bb plugin install git:https://github.com/ainurminibaev/bb-plugin-mac-computer-use.git@^0.3.3
+bb plugin install git:https://github.com/ainurminibaev/bb-plugin-mac-computer-use.git@^0.3.4
 ```
 
 Then open Settings → Mac Computer Use, install Cua Driver on your Mac, grant the two permissions on the Mac (System Settings → Privacy & Security → Accessibility and Screen & System Audio Recording → CuaDriver), enable access and run the connection check. Agent tools appear in new agent sessions.
