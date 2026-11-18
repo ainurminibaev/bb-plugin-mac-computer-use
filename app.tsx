@@ -190,7 +190,8 @@ function Journal({ rpc }: { rpc: Rpc }) {
 
 function Screen() {
   const rpc = useRpc<typeof rpcContract>();
-  const [data, setData] = useState<{ machines: MachineView[]; latestDriver: string | null } | null>(null);
+  type Candidate = { orphan: string; hostId: string; reason: string; entryName: string };
+  const [data, setData] = useState<{ machines: MachineView[]; latestDriver: string | null; candidates: Candidate[]; orphans: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [wizard, setWizard] = useState<string | null>(null);
   const reload = useCallback(() => { rpc.call('overview', null).then(d => { setData(d); setError(null); }, e => setError(errText(e))); }, [rpc]);
@@ -227,8 +228,12 @@ function Screen() {
         <Icon name="Laptop" className="size-4 text-muted-foreground" />
         <span className="flex-1 truncate">{m.name}</span>
         <span className="text-xs text-muted-foreground">{!m.connected ? 'офлайн' : !m.driverVersion ? 'драйвер не установлен' : m.permissions?.accessibility && m.permissions.screenRecording ? 'готов к подключению' : 'нужны разрешения macOS'}</span>
+        {(data.candidates ?? []).filter(c => c.hostId === m.id).slice(0, 1).map(c => <Button key={c.orphan} size="sm" aria-label={`Привязать к этому компьютеру запись «${c.entryName}» с прежней установки BB: ${c.reason}`}
+          onClick={() => rpc.call('bindOrphan', { orphan: c.orphan, hostId: m.id }).then(reload, e => setError(errText(e)))}>Привязать к этому компьютеру</Button>)}
         <Button size="sm" variant="outline" onClick={() => setWizard(m.id)}>Подключить</Button>
       </div>)}
+      {(data.candidates ?? []).length > 0 && <p className="text-xs text-muted-foreground">«Привязать к этому компьютеру» переносит прежние настройки доступа (с прошлой установки BB) на этот компьютер. Автоматически это делается только при совпадении аппаратного признака Mac; при сомнении — только по вашему нажатию.</p>}
+      {data.orphans > 0 && !(data.candidates ?? []).length && <p className="text-xs text-muted-foreground">Записей доступа от прежней установки BB без подходящего компьютера: {data.orphans}. Они не дают доступа и привяжутся сами, когда этот Mac подключится.</p>}
       {!candidates.length && <p className="text-sm text-muted-foreground">Нет других Mac. Подключите Mac к BB (Settings → Machines) — он появится здесь.</p>}
       {others.length > 0 && <p className="text-xs text-muted-foreground">Не Mac или офлайн: {others.map(m => m.name).join(', ')}.</p>}
     </section>}

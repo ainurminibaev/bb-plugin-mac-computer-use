@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { hostContract, type CallResult } from './contract';
 import { OVERLAY_JXA } from './overlay-script';
 import { APPLET_BUNDLE_ID, APPLET_NAME, APPLET_SOURCE, APPLET_VERSION } from './automation-applet';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 const MAX_TEXT = 60_000;
 const APP = '/Applications/CuaDriver.app';
@@ -450,6 +450,13 @@ export default experimental_defineHostEntry({
       delete all[session];
       await writeStopped(all);
       return { ok: true };
+    },
+    identity: async () => {
+      if (process.platform !== 'darwin') return { hw: null };
+      const r = await run('/usr/sbin/ioreg', ['-rd1', '-c', 'IOPlatformExpertDevice'], 15_000);
+      const uuid = /"IOPlatformUUID"\s*=\s*"([^"]+)"/.exec(r.stdout)?.[1];
+      // Only a salted hash leaves the Mac; the UUID itself is never stored or sent.
+      return { hw: uuid ? createHash('sha256').update(`bb-mac-computer-use:${uuid}`).digest('hex').slice(0, 32) : null };
     },
     apps: async ({ pids }) => ({ apps: await Promise.all(pids.map(appOf)) }),
   },

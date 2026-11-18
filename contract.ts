@@ -68,6 +68,8 @@ export const hostContract = defineRpcContract({
     input: z.object({ script: z.string().min(1).max(50_000), timeoutMs: z.number().int().min(1000).max(300_000), display: z.object({ title: z.string().max(200), step: z.string().max(200), session: z.string().max(100) }).nullable() }),
     output: z.object({ ok: z.boolean(), text: z.string(), timedOut: z.boolean() }),
   },
+  /** Salted SHA-256 of the Mac hardware UUID: a stable, non-reversible machine trait for rebinding access after a BB reinstall. */
+  identity: { input: z.null(), output: z.object({ hw: z.string().nullable() }) },
   apps: { input: z.object({ pids: z.array(z.number().int().positive()).max(50) }), output: z.object({ apps: z.array(appSchema) }) },
 });
 
@@ -85,7 +87,17 @@ export const machineViewSchema = z.object({
 export type MachineView = z.infer<typeof machineViewSchema>;
 
 export const rpcContract = defineRpcContract({
-  overview: { input: z.null(), output: z.object({ machines: z.array(machineViewSchema), latestDriver: z.string().nullable() }) },
+  overview: {
+    input: z.null(),
+    output: z.object({
+      machines: z.array(machineViewSchema),
+      latestDriver: z.string().nullable(),
+      /** Entries left from an earlier BB install that may belong to a current computer. */
+      candidates: z.array(z.object({ orphan: z.string(), hostId: z.string(), reason: z.string(), entryName: z.string() })),
+      orphans: z.number(),
+    }),
+  },
+  bindOrphan: { input: z.object({ orphan: z.string(), hostId: z.string() }), output: z.object({ ok: z.boolean() }) },
   setPolicy: { input: z.object({ hostId: z.string(), policy: machinePolicySchema }), output: z.object({ ok: z.boolean() }) },
   check: {
     input: z.object({ hostId: z.string() }),

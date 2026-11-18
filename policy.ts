@@ -15,6 +15,8 @@ export const machinePolicySchema = z.object({
   foreground: z.boolean().default(false),
   /** Allowed apps (bundle id or app name). Empty — every app. */
   apps: z.array(z.string().trim().min(1).max(200)).max(100).default([]),
+  /** Stable machine traits that survive a BB reinstall (new host IDs): BB machine name and a salted hash of the Mac's hardware UUID. */
+  fingerprint: z.object({ name: z.string().max(200).optional(), hw: z.string().regex(/^[a-f0-9]{16,64}$/).optional() }).optional(),
 });
 export type MachinePolicy = z.infer<typeof machinePolicySchema>;
 
@@ -136,4 +138,52 @@ export function decideScript(policy: MachinePolicy, targets: string[]): { ok: tr
   if (!targets.length) return { ok: false, reason: 'Разрешены только отдельные приложения: в скрипте укажи tell application "<разрешённое>".' };
   const bad = targets.filter(t => !appAllowed(policy, { bundleId: t, name: t }));
   return bad.length ? { ok: false, reason: `Приложения не входят в список разрешённых: ${bad.join(', ')}.` } : { ok: true };
+}
+
+export type HostTraits = { id: string; name: string; hw: string | null };
+export type Rebind = { from: string; to: string; reason: string };
+export type BindCandidate = { orphan: string; hostId: string; reason: string };
+
+/**
+ * After a BB reinstall host IDs change. An entry whose host ID no longer exists
+ * («orphan») moves to a current host only on an unambiguous hardware match:
+ * exactly one orphan and exactly one current host without an entry share the
+ * same hardware hash. A name-only match or any ambiguity never grants access —
+ * it becomes a candidate for an explicit «Bind to this computer» click.
+ */
+export function rebindOrphans(file: PolicyFile, hosts: HostTraits[]): { file: PolicyFile; rebound: Rebind[]; candidates: BindCandidate[] } {
+  const machines = { ...file.machines };
+  const known = new Set(hosts.map(h => h.id));
+  const free = hosts.filter(h => !machines[h.id]);
+  const orphans = Object.keys(machines).filter(k => !known.has(k));
+  const rebound: Rebind[] = [];
+  const candidates: BindCandidate[] = [];
+  for (const key of orphans) {
+    const fp = machines[key]!.fingerprint ?? {};
+    const hwHosts = fp.hw ? free.filter(h => h.hw === fp.hw) : [];
+    const sameHw = fp.hw ? orphans.filter(k => machines[k]?.fingerprint?.hw === fp.hw) : [];
+    if (hwHosts.length === 1 && sameHw.length === 1 && !machines[hwHosts[0]!.id]) {
+      const h = hwHosts[0]!;
+      machines[h.id] = { ...machines[key]!, fingerprint: { name: h.name, hw: fp.hw } };
+      delete machines[key];
+      rebound.push({ from: key, to: h.id, reason: `совпал аппаратный признак Mac (${h.name})` });
+      continue;
+    }
+    // Doubt: offer an explicit bind, never apply it.
+    const byName = fp.name ? free.filter(h => normName(h.name) === normName(fp.name!)) : [];
+    for (const h of hwHosts.length ? hwHosts : byName)
+      candidates.push({ orphan: key, hostId: h.id, reason: hwHosts.length ? 'совпал аппаратный признак, но вариантов несколько' : `совпало имя «${h.name}», аппаратный признак не подтверждён` });
+  }
+  return { file: { machines }, rebound, candidates };
+}
+
+/** Explicit user bind: moves one orphan entry to a host that has no entry yet. */
+export function bindOrphan(file: PolicyFile, orphan: string, host: HostTraits): PolicyFile {
+  const entry = file.machines[orphan];
+  if (!entry) throw new Error('Запись доступа не найдена.');
+  if (file.machines[host.id]) throw new Error('У этого компьютера уже есть своя запись доступа.');
+  const machines = { ...file.machines };
+  delete machines[orphan];
+  machines[host.id] = { ...entry, fingerprint: { name: host.name, ...(host.hw ? { hw: host.hw } : {}) } };
+  return { machines };
 }

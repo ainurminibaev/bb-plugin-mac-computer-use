@@ -44,10 +44,14 @@ The caption has a **Stop agent** button: one click revokes GUI access for that t
 
 A computer that is not listed in the access policy is denied. Tools `kill_app`, `clipboard_read`, `set_config`, `install_extension`, `check_for_update`, `replay_trajectory`, `browser_download`, `browser_set_input_files` are blocked by default (`deniedTools`).
 
+## Access survives a BB reinstall
+
+Each access entry stores, besides the BB host ID, stable machine traits: the BB machine name and a salted SHA-256 of the Mac's hardware UUID (the UUID itself never leaves the Mac). After BB is restored with new host IDs, an old entry moves to its Mac automatically only when exactly one current Mac has the same hardware hash. A name-only match or any ambiguity grants nothing: Settings shows «Bind to this computer» for a one-click decision. Every rebind and bind is logged in the action journal.
+
 ## Install
 
 ```sh
-bb plugin install git:https://github.com/ainurminibaev/bb-plugin-mac-computer-use.git@^0.3.4
+bb plugin install git:https://github.com/ainurminibaev/bb-plugin-mac-computer-use.git@^0.3.5
 ```
 
 Then open Settings → Mac Computer Use, install Cua Driver on your Mac, grant the two permissions on the Mac (System Settings → Privacy & Security → Accessibility and Screen & System Audio Recording → CuaDriver), enable access and run the connection check. Agent tools appear in new agent sessions.

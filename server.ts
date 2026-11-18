@@ -2,7 +2,7 @@ import type { BbPluginApi } from '@get-bb/plugin-sdk';
 import { z } from 'zod';
 import { hostContract, rpcContract, type CallResult, type MachineView } from './contract';
 import { scriptTargets } from './automation-applet';
-import { appAllowed, caption, collectPids, decide, decideScript, normName, parsePolicy, policyFor, policyFileSchema, type MachinePolicy } from './policy';
+import { appAllowed, bindOrphan, caption, collectPids, decide, decideScript, normName, parsePolicy, rebindOrphans, type BindCandidate, type HostTraits, policyFor, policyFileSchema, type MachinePolicy } from './policy';
 export type { rpcContract } from './contract';
 
 /** Developer ID team of Cua AI, Inc.: an install with another signer is refused. */
@@ -38,7 +38,48 @@ export default function plugin(bb: BbPluginApi) {
   const host = bb.hosts.experimental_client({ contract: hostContract });
 
   async function policyOf(hostId: string): Promise<MachinePolicy> {
-    return policyFor(parsePolicy((await settings.get()).accessPolicy), hostId);
+    let file = parsePolicy((await settings.get()).accessPolicy);
+    // A missing entry may be one left from an earlier BB install: try a safe rebind first.
+    if (!file.machines[hostId]) file = (await syncPolicy()).file;
+    return policyFor(file, hostId);
+  }
+
+  const hwCache = new Map<string, string | null>();
+  /** Current machines with their stable traits; the hardware hash comes from each connected Mac. */
+  async function hostTraits(): Promise<HostTraits[]> {
+    const list = await bb.sdk.hosts.list();
+    return Promise.all(list.map(async h => {
+      if (!hwCache.has(h.id) && h.status === 'connected') {
+        const id = await host.call('identity', null, { hostId: h.id }).catch(() => null);
+        if (id) hwCache.set(h.id, id.hw);
+      }
+      return { id: h.id, name: h.name, hw: hwCache.get(h.id) ?? null };
+    }));
+  }
+
+  /**
+   * Records traits on live entries, then moves entries left from an earlier BB
+   * install to their computer on an unambiguous hardware match. Every move is
+   * journaled; anything uncertain is only offered as a one-click bind.
+   */
+  async function syncPolicy(): Promise<{ file: ReturnType<typeof parsePolicy>; candidates: BindCandidate[] }> {
+    const raw = (await settings.get()).accessPolicy;
+    const file = parsePolicy(raw);
+    const hosts = await hostTraits();
+    for (const h of hosts) {
+      const e = file.machines[h.id];
+      if (!e) continue;
+      const fp = { name: h.name, ...(h.hw ? { hw: h.hw } : e.fingerprint?.hw ? { hw: e.fingerprint.hw } : {}) };
+      if (e.fingerprint?.name !== fp.name || e.fingerprint?.hw !== fp.hw) e.fingerprint = fp;
+    }
+    const r = rebindOrphans(file, hosts);
+    const next = JSON.stringify(r.file);
+    if (next !== JSON.stringify(parsePolicy(raw))) await settings.experimental_set({ accessPolicy: next });
+    for (const x of r.rebound) {
+      bb.log.info(`mac-computer-use: access entry ${x.from} → ${x.to}: ${x.reason}`);
+      await journal({ machine: hosts.find(h => h.id === x.to)?.name ?? x.to, threadId: '—', tool: 'перепривязка доступа', why: `после переустановки BB: ${x.reason}`, result: `запись ${x.from} → ${x.to}` });
+    }
+    return { file: r.file, candidates: r.candidates };
   }
 
   /** Resolves an explicit machine reference to a connected macOS host with the driver. */
@@ -269,14 +310,27 @@ export default function plugin(bb: BbPluginApi) {
 
   bb.rpc.register(rpcContract, {
     overview: async () => {
+      const synced = await syncPolicy();
       const machines = await bb.sdk.hosts.list();
+      const known = new Set(machines.map(m => m.id));
       const [views, latest] = await Promise.all([Promise.all(machines.map(describeMachine)), latestDriver()]);
-      return { machines: views, latestDriver: latest };
+      const candidates = synced.candidates.map(c => ({ ...c, entryName: synced.file.machines[c.orphan]?.fingerprint?.name ?? c.orphan }));
+      return { machines: views, latestDriver: latest, candidates, orphans: Object.keys(synced.file.machines).filter(k => !known.has(k)).length };
     },
     setPolicy: async ({ hostId, policy }) => {
       const file = parsePolicy((await settings.get()).accessPolicy);
-      file.machines[hostId] = policy;
+      const traits = (await hostTraits()).find(h => h.id === hostId);
+      file.machines[hostId] = { ...policy, fingerprint: traits ? { name: traits.name, ...(traits.hw ? { hw: traits.hw } : {}) } : policy.fingerprint };
       await settings.experimental_set({ accessPolicy: JSON.stringify(file) });
+      return { ok: true };
+    },
+    bindOrphan: async ({ orphan, hostId }) => {
+      const file = parsePolicy((await settings.get()).accessPolicy);
+      const traits = (await hostTraits()).find(h => h.id === hostId);
+      if (!traits) throw new Error('Компьютер не найден.');
+      await settings.experimental_set({ accessPolicy: JSON.stringify(bindOrphan(file, orphan, traits)) });
+      bb.log.info(`mac-computer-use: access entry ${orphan} bound to ${hostId} by the user`);
+      await journal({ machine: traits.name, threadId: '—', tool: 'привязка доступа', why: 'нажата «Привязать к этому компьютеру»', result: `запись ${orphan} → ${hostId}` });
       return { ok: true };
     },
     check: async ({ hostId }) => {

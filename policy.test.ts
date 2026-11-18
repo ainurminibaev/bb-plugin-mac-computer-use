@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { appAllowed, caption, collectPids, decideScript, normName, decide, parsePolicy, policyFor, type MachinePolicy } from './policy.ts';
+import { appAllowed, bindOrphan, caption, collectPids, decideScript, normName, rebindOrphans, decide, parsePolicy, policyFor, type MachinePolicy } from './policy.ts';
 
 const full: MachinePolicy = { enabled: true, screen: true, input: true, pointer: true, showActions: true, foreground: false, apps: [] };
 
@@ -100,4 +100,43 @@ test('AppleScript decision and target parsing', async () => {
   assert.equal(decideScript(p, []).ok, false);
   assert.equal(decideScript(p, ['TextEdit']).ok, true);
   assert.equal(decideScript(p, ['TextEdit', 'Finder']).ok, false);
+});
+
+test('restore with new host IDs: unambiguous hardware match rebinds, doubt only proposes', () => {
+  const entry = (name: string, hw?: string) => ({ ...full, fingerprint: { name, ...(hw ? { hw } : {}) } });
+  const before = { machines: {
+    host_old_mac: entry('Studio Mac', 'aaaaaaaaaaaaaaaa'),
+    host_old_air: entry('Air'),                                      // recorded without hardware hash
+    host_old_twin1: entry('Twin', 'bbbbbbbbbbbbbbbb'),
+    host_old_twin2: entry('Twin', 'bbbbbbbbbbbbbbbb'),               // duplicate hash: ambiguous
+  } };
+  const hosts = [
+    { id: 'host_new_mac', name: 'Studio Mac (2)', hw: 'aaaaaaaaaaaaaaaa' }, // renamed, same hardware
+    { id: 'host_new_air', name: 'Air', hw: 'cccccccccccccccc' },            // same name, different hardware
+    { id: 'host_new_twin', name: 'Twin', hw: 'bbbbbbbbbbbbbbbb' },
+    { id: 'host_linux', name: 'Server', hw: null },
+  ];
+  const r = rebindOrphans(before, hosts);
+  assert.deepEqual(r.rebound.map(x => [x.from, x.to]), [['host_old_mac', 'host_new_mac']]);
+  assert.equal(r.file.machines.host_new_mac!.enabled, true);
+  assert.equal(r.file.machines.host_new_mac!.fingerprint!.name, 'Studio Mac (2)');
+  assert.equal(r.file.machines.host_old_mac, undefined);
+  // No access granted on doubt.
+  assert.equal(r.file.machines.host_new_air, undefined);
+  assert.equal(r.file.machines.host_new_twin, undefined);
+  assert.equal(r.file.machines.host_linux, undefined);
+  assert.deepEqual(r.candidates.map(c => [c.orphan, c.hostId]).sort(), [['host_old_air', 'host_new_air'], ['host_old_twin1', 'host_new_twin'], ['host_old_twin2', 'host_new_twin']]);
+  // Second pass is stable.
+  assert.equal(rebindOrphans(r.file, hosts).rebound.length, 0);
+  // Explicit bind moves exactly one entry and keeps its settings.
+  const bound = bindOrphan(r.file, 'host_old_air', hosts[1]!);
+  assert.equal(bound.machines.host_new_air!.enabled, true);
+  assert.equal(bound.machines.host_old_air, undefined);
+  assert.throws(() => bindOrphan(bound, 'host_old_twin1', hosts[1]!));
+});
+
+test('existing host keeps its entry; no orphans, no changes', () => {
+  const f = { machines: { h1: { ...full, fingerprint: { hw: 'aaaaaaaaaaaaaaaa' } } } };
+  const r = rebindOrphans(f, [{ id: 'h1', name: 'Mac', hw: 'aaaaaaaaaaaaaaaa' }]);
+  assert.equal(r.rebound.length + r.candidates.length, 0);
 });

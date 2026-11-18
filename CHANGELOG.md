@@ -2,6 +2,12 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/), versions: [SemVer](https://semver.org/). Git tags: `vX.Y.Z`.
 
+## [0.3.5] — 2026-11-18
+
+### Added
+- Access entries keep stable machine traits (BB machine name, salted SHA-256 of the Mac hardware UUID) and move to their Mac automatically after a BB reinstall with new host IDs — only on an unambiguous hardware match. Name-only or ambiguous matches only show a one-click «Bind to this computer». Rebinds and binds are journaled.
+- Test for the «restore with new IDs» scenario.
+
 ## [0.3.4] — 2026-11-18
 
 ### Added
