@@ -13,6 +13,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/), versions: [SemVer](http
 ### Changed
 - Overlay is one process at most (pid file), event-driven: it exits ~8 s after hiding, when its parent host worker dies, or when replaced; leftover 0.3.x overlay processes are stopped.
 
+### Measured (MacBook Pro, Apple silicon, Sonnet agent, task «open Chrome → ya.ru → search»)
+- Real pointer mode: 5 calls, 0 pictures, ~36 s end to end, context ~69k tokens (mostly the fixed system prompt).
+- «Don't touch my mouse»: 6 calls, 1 window picture (the search field was not yet in the first tree), ~42 s, context ~84k tokens.
+- Overlay: one process, ~0.1 % CPU and ~66 MB RSS while visible; it exits ~8 s after the last action, so nothing runs when idle.
+
 ### Fixed
 - The driver's agent cursor glow from 0.3.2 only appeared during the driver's own pointer animations and was easy to miss; v2 highlights the real pointer instead.
 
