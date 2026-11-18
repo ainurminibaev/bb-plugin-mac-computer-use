@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { appAllowed, collectPids, normName, decide, parsePolicy, policyFor, type MachinePolicy } from './policy.ts';
+import { appAllowed, caption, collectPids, normName, decide, parsePolicy, policyFor, type MachinePolicy } from './policy.ts';
 
-const full: MachinePolicy = { enabled: true, screen: true, input: true, pointer: true, apps: [] };
+const full: MachinePolicy = { enabled: true, screen: true, input: true, pointer: true, showActions: true, foreground: false, apps: [] };
 
 test('unknown machine is disabled', () => {
   const p = policyFor(parsePolicy('{"machines":{}}'), 'host_x');
@@ -80,4 +80,12 @@ test('pointer off: only element actions', () => {
   assert.equal(decide(p, 'run_steps', { steps: [{ drag: { pid: 1 } }] }).ok, false);
   assert.equal(decide(p, 'run_steps', { steps: [{ click: { app: 'TextEdit', role: 'button', name: 'OK' } }] }).ok, true);
   assert.equal(decide(p, 'get_window_state', { pid: 1 }).ok, true);
+});
+
+test('caption has agent and a default step', () => {
+  assert.equal(caption('Assistant', 'type_text', undefined, 'TextEdit'), 'BB · Assistant: печатает в TextEdit');
+  assert.equal(caption('Assistant', 'click', 'нажимает «Сохранить»', 'TextEdit'), 'BB · Assistant: нажимает «Сохранить»');
+  assert.equal(caption('', 'something_new', undefined, null), 'BB · агент: работает');
+  assert.equal(parsePolicy('{"machines":{"h":{"enabled":true}}}').machines.h!.showActions, true);
+  assert.equal(parsePolicy('{"machines":{"h":{"enabled":true}}}').machines.h!.foreground, false);
 });

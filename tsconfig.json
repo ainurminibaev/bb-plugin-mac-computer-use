@@ -28,6 +28,7 @@
     "policy.ts",
     "components",
     "lib",
-    "hooks"
+    "hooks",
+    "overlay-script.ts"
   ]
 }

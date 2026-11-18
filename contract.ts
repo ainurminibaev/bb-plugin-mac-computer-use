@@ -42,6 +42,8 @@ export const hostContract = defineRpcContract({
       session: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/).nullable(),
       wantImage: z.boolean(),
       maxImageWidth: z.number().int().min(160).max(4096),
+      /** Visible mode: agent cursor + caption overlay; optional bring-to-front. */
+      display: z.object({ show: z.boolean(), label: z.string().max(200), foreground: z.boolean() }).nullable().default(null),
     }),
     output: callResultSchema,
   },

@@ -1,7 +1,7 @@
 import type { BbPluginApi } from '@get-bb/plugin-sdk';
 import { z } from 'zod';
 import { hostContract, rpcContract, type CallResult, type MachineView } from './contract';
-import { appAllowed, decide, normName, parsePolicy, policyFor, policyFileSchema, type MachinePolicy } from './policy';
+import { appAllowed, caption, collectPids, decide, normName, parsePolicy, policyFor, policyFileSchema, type MachinePolicy } from './policy';
 export type { rpcContract } from './contract';
 
 /** Developer ID team of Cua AI, Inc.: an install with another signer is refused. */
@@ -12,6 +12,8 @@ const DEFAULT_DENY = 'kill_app,clipboard_read,set_config,install_extension,check
 /** The owner's rule: command line first, GUI only when nothing else works. */
 const LADDER = 'Порядок для Mac: 1) командная строка через `bb terminal run --machine <mac>` (shell, open, defaults, osascript/AppleScript, CLI приложений); 2) скриптовые и программные интерфейсы (AppleScript-словари, `shortcuts run`, API приложений, действия Accessibility по element_token без мыши); 3) только если этого недостаточно — экран, мышь и клавиатура через mac_*. Перед GUI коротко объясни пользователю, почему не хватило 1–2.';
 const whyParam = z.string().trim().min(8).max(300).describe('Обязательно: коротко, почему командной строки и скриптовых интерфейсов недостаточно (например: «нет AppleScript-словаря, нужна кнопка в окне»).');
+
+const stepParam = z.string().trim().min(2).max(80).optional().describe('Подпись шага на экране Mac для человека, 2–6 слов: «печатает ответ в TextEdit». Без неё — подпись по умолчанию по инструменту.');
 
 const machineParam = z.string().min(1).max(200).describe('Целевой Mac: ID машины BB (host_…) или её точное имя из `bb machine list`. Указывай явно.');
 
@@ -78,24 +80,45 @@ export default function plugin(bb: BbPluginApi) {
   }
 
   /** Policy check + app allowlist + driver call, all in one place for both agent tools. */
-  async function guardedCall(machine: string, threadId: string, tool: string, args: Record<string, unknown>, why: string): Promise<ToolResult> {
+  async function guardedCall(machine: string, threadId: string, tool: string, args: Record<string, unknown>, why: string, step?: string): Promise<ToolResult> {
     if (await denied(tool)) return fail(`Инструмент ${tool} запрещён настройкой плагина Mac Computer Use (deniedTools).`);
     const target = await resolveMac(machine);
     const policy = await policyOf(target.id);
     const decision = decide(policy, tool, args);
     if (!decision.ok) { await journal({ machine: target.name, threadId, tool, why, result: `отказ: ${decision.reason}` }); return fail(`[${target.name}] ${decision.reason}`); }
+    const pidsForName = decision.pids.length ? decision.pids : collectPids(args).slice(0, 1);
+    const { apps } = pidsForName.length ? await host.call('apps', { pids: pidsForName }, { hostId: target.id }) : { apps: [] };
     if (decision.pids.length) {
-      const { apps } = await host.call('apps', { pids: decision.pids }, { hostId: target.id });
       const blocked = apps.filter(a => !appAllowed(policy, a));
       if (blocked.length) { await journal({ machine: target.name, threadId, tool, why, result: 'отказ: приложение не разрешено' }); return fail(`[${target.name}] Приложение ${blocked.map(a => a.bundleId ?? a.name ?? a.pid).join(', ')} не входит в список разрешённых (${policy.apps.join(', ')}).`); }
     }
     const { maxImageWidth } = await settings.get();
     const session = `bb-${threadId}`.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 64);
-    const r = await host.call('call', { tool, args: JSON.stringify(args), session, wantImage: policy.screen, maxImageWidth: Number(maxImageWidth) || 1568 }, { hostId: target.id, timeoutMs: 180_000 });
+    const appName = apps[0]?.name ?? (typeof args.app === 'string' ? args.app : null) ?? (decision.launchTarget ?? null);
+    const display = { show: policy.showActions, foreground: policy.foreground, label: caption(await agentName(threadId), tool, step, appName) };
+    const r = await host.call('call', { tool, args: JSON.stringify(args), session, wantImage: policy.screen, maxImageWidth: Number(maxImageWidth) || 1568, display }, { hostId: target.id, timeoutMs: 180_000 });
     await journal({ machine: target.name, threadId, tool, why, result: r.ok ? 'ok' : `ошибка ${r.exitCode}` });
     const res = toResult(target, tool, r);
     res.content[0] = { type: 'text', text: `Причина GUI: ${why}\n${(res.content[0] as { text: string }).text}` };
     return res;
+  }
+
+  const names = new Map<string, string>();
+  /** Human name for the caption: the thread's project, else the thread title. */
+  async function agentName(threadId: string): Promise<string> {
+    if (names.has(threadId)) return names.get(threadId)!;
+    let name = '';
+    try {
+      const thread = await bb.sdk.threads.get({ threadId }) as { title?: string | null; projectId?: string | null };
+      if (thread.projectId) {
+        const list = await bb.sdk.projects.list({ includePersonal: true }).catch(() => []) as { id: string; name?: string }[];
+        name = list.find(p => p.id === thread.projectId)?.name ?? '';
+      }
+      if (!name) name = thread.title ?? '';
+    } catch { name = ''; }
+    name = name.replace(/\s+/g, ' ').trim().slice(0, 40);
+    names.set(threadId, name);
+    return name;
   }
 
   type JournalEntry = { at: number; machine: string; threadId: string; tool: string; why: string; result: string };
@@ -118,11 +141,12 @@ export default function plugin(bb: BbPluginApi) {
       pid: z.number().int().positive().optional().describe('PID приложения (из mac_action list_apps / list_windows).'),
       window_id: z.number().int().positive().optional().describe('ID окна (из list_windows); вместе с pid.'),
       why_gui: whyParam,
+      step: stepParam,
     }),
-    async execute({ machine, pid, window_id, why_gui }, { threadId }) {
+    async execute({ machine, pid, window_id, why_gui, step }, { threadId }) {
       const tool = pid !== undefined ? 'get_window_state' : 'get_desktop_state';
       const args = pid !== undefined ? { pid, ...(window_id !== undefined ? { window_id } : {}) } : {};
-      return guardedCall(machine, threadId, tool, args, why_gui);
+      return guardedCall(machine, threadId, tool, args, why_gui, step);
     },
   });
 
@@ -135,9 +159,10 @@ export default function plugin(bb: BbPluginApi) {
       tool: z.string().regex(/^[a-z][a-z0-9_]{1,63}$/).describe('Имя инструмента Cua Driver, например click или type_text.'),
       args: z.record(z.string(), z.unknown()).default({}).describe('Аргументы инструмента (JSON-объект).'),
       why_gui: whyParam,
+      step: stepParam,
     }),
-    async execute({ machine, tool, args, why_gui }, { threadId }) {
-      return guardedCall(machine, threadId, tool, args ?? {}, why_gui);
+    async execute({ machine, tool, args, why_gui, step }, { threadId }) {
+      return guardedCall(machine, threadId, tool, args ?? {}, why_gui, step);
     },
   });
 
@@ -153,7 +178,7 @@ export default function plugin(bb: BbPluginApi) {
       const target = await resolveMac(machine);
       if (tool === 'status') {
         const p = await policyOf(target.id);
-        const access = `Доступ в BB: ${p.enabled ? 'включён' : 'ВЫКЛЮЧЕН'}; экран: ${p.screen ? 'да' : 'нет'}; управление: ${p.input ? 'да' : 'нет'}; мышь по координатам: ${p.pointer ? 'да' : 'нет'}; приложения: ${p.apps.length ? p.apps.join(', ') : 'все'}`;
+        const access = `Доступ в BB: ${p.enabled ? 'включён' : 'ВЫКЛЮЧЕН'}; экран: ${p.screen ? 'да' : 'нет'}; управление: ${p.input ? 'да' : 'нет'}; мышь по координатам: ${p.pointer ? 'да' : 'нет'}; показ действий на экране: ${p.showActions ? 'да' : 'нет'}; вывод окна вперёд: ${p.foreground ? 'да' : 'нет'}; приложения: ${p.apps.length ? p.apps.join(', ') : 'все'}`;
         return `[${target.name}] ${access}\n${LADDER}\n${(await host.call('status', null, { hostId: target.id })).text}`;
       }
       return `[${target.name}]\n${(await host.call('describe', { tool: tool ?? null }, { hostId: target.id })).text}`;

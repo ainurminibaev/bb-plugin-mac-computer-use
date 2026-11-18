@@ -9,6 +9,10 @@ export const machinePolicySchema = z.object({
   input: z.boolean().default(true),
   /** Synthetic pointer: clicks/drags by x,y, cursor moves, foreground delivery. Off — only accessibility actions on elements. */
   pointer: z.boolean().default(true),
+  /** Visible mode: highlighted agent cursor and a caption «BB · agent: step» on the Mac screen. */
+  showActions: z.boolean().default(true),
+  /** Bring the target app to the front before acting (off: background work without stealing focus). */
+  foreground: z.boolean().default(false),
   /** Allowed apps (bundle id or app name). Empty — every app. */
   apps: z.array(z.string().trim().min(1).max(200)).max(100).default([]),
 });
@@ -19,7 +23,7 @@ export const policyFileSchema = z.object({
 });
 export type PolicyFile = z.infer<typeof policyFileSchema>;
 
-export const DISABLED: MachinePolicy = { enabled: false, screen: true, input: true, pointer: true, apps: [] };
+export const DISABLED: MachinePolicy = { enabled: false, screen: true, input: true, pointer: true, showActions: true, foreground: false, apps: [] };
 
 export function parsePolicy(raw: string): PolicyFile {
   try { return policyFileSchema.parse(JSON.parse(raw || '{}')); } catch { return { machines: {} }; }
@@ -103,4 +107,19 @@ export function usesPointer(tool: string, args: unknown): boolean {
     return Object.values(o).some(walk);
   };
   return walk(args);
+}
+
+const VERBS: Record<string, string> = {
+  click: 'нажимает', double_click: 'дважды нажимает', right_click: 'открывает контекстное меню',
+  type_text: 'печатает', set_value: 'вводит значение', press_key: 'нажимает клавишу', hotkey: 'нажимает сочетание клавиш',
+  scroll: 'прокручивает', drag: 'перетаскивает', move_cursor: 'двигает курсор', launch_app: 'запускает приложение',
+  bring_to_front: 'переключает окно', invoke_menu: 'выбирает пункт меню', get_window_state: 'смотрит на окно',
+  get_desktop_state: 'смотрит на экран', zoom: 'рассматривает фрагмент', list_windows: 'ищет окно', list_apps: 'ищет приложение',
+  run_steps: 'выполняет несколько шагов', run_script: 'выполняет сценарий',
+};
+
+/** Caption shown on the Mac: «BB · <agent>: <step>», with a readable default step. */
+export function caption(agent: string, tool: string, step: string | undefined, app: string | null): string {
+  const what = step?.trim() || `${VERBS[tool] ?? 'работает'}${app ? ` в ${app}` : ''}`;
+  return `BB · ${agent.trim() || 'агент'}: ${what}`.slice(0, 160);
 }

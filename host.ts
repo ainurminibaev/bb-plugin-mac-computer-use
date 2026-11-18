@@ -1,10 +1,11 @@
 import { experimental_defineHostEntry } from '@get-bb/plugin-sdk/host';
 import { execFile, spawn } from 'node:child_process';
-import { access, mkdir, mkdtemp, readFile, rm, symlink, unlink } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rename, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { arch, homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { hostContract, type CallResult } from './contract';
+import { OVERLAY_JXA } from './overlay-script';
 
 const MAX_TEXT = 60_000;
 const APP = '/Applications/CuaDriver.app';
@@ -212,6 +213,56 @@ async function install(version: string, teamId: string): Promise<{ ok: boolean; 
   }
 }
 
+// ---- Visible mode: driver agent cursor + caption overlay ----
+
+const OVERLAY_DIR = join(homedir(), 'Library/Application Support/bb-mac-computer-use');
+const OVERLAY_SCRIPT = join(OVERLAY_DIR, 'overlay.jxa.js');
+const OVERLAY_STATE = join(OVERLAY_DIR, 'overlay-state.json');
+let overlayPid: number | null = null;
+let overlaySeq = Date.now();
+const cursorReady = new Set<string>();
+const lastPos = new Map<string, { x: number; y: number }>();
+
+const alive = (pid: number | null) => { if (!pid) return false; try { process.kill(pid, 0); return true; } catch { return false; } };
+
+/** Writes the caption state; the overlay process picks it up within 0.1 s. */
+async function showOverlay(label: string, pos: { x: number; y: number } | null, ttlMs = 6000): Promise<void> {
+  await mkdir(OVERLAY_DIR, { recursive: true });
+  const tmp = `${OVERLAY_STATE}.tmp`;
+  await writeFile(tmp, JSON.stringify({ seq: ++overlaySeq, label, x: pos?.x ?? null, y: pos?.y ?? null, ttlMs }));
+  await rename(tmp, OVERLAY_STATE);
+  if (alive(overlayPid)) return;
+  let current = '';
+  try { current = await readFile(OVERLAY_SCRIPT, 'utf8'); } catch { /* first run */ }
+  if (current !== OVERLAY_JXA) await writeFile(OVERLAY_SCRIPT, OVERLAY_JXA);
+  // osascript draws a click-through, non-activating panel; it never takes focus.
+  const child = spawn('/usr/bin/osascript', ['-l', 'JavaScript', OVERLAY_SCRIPT, OVERLAY_STATE], { detached: true, stdio: 'ignore' });
+  child.unref();
+  overlayPid = child.pid ?? null;
+}
+
+async function driverJson(driver: string, tool: string, args: Record<string, unknown>): Promise<Record<string, unknown> | null> {
+  const r = await run(driver, ['call', tool, JSON.stringify(args)], 15_000);
+  if (r.code !== 0) return null;
+  try { return JSON.parse(r.stdout) as Record<string, unknown>; } catch { return null; }
+}
+
+async function cursorPosition(driver: string, session: string): Promise<{ x: number; y: number } | null> {
+  const s = await driverJson(driver, 'get_agent_cursor_state', { session });
+  const p = s?.position as { x?: unknown; y?: unknown } | null | undefined;
+  return p && typeof p.x === 'number' && typeof p.y === 'number' ? { x: p.x, y: p.y } : null;
+}
+
+/** Turns the driver's own agent cursor on (with glow and click ripple) or off for this session. */
+async function prepareCursor(driver: string, session: string, show: boolean): Promise<void> {
+  const key = `${session}:${show}`;
+  if (cursorReady.has(key)) return;
+  await driverJson(driver, 'set_agent_cursor_enabled', { session, enabled: show });
+  if (show) await driverJson(driver, 'set_agent_cursor_motion', { session, effects: { glow: 'on', ripple: 'on' } });
+  cursorReady.delete(`${session}:${!show}`);
+  cursorReady.add(key);
+}
+
 export default experimental_defineHostEntry({
   contract: hostContract,
   handlers: {
@@ -220,7 +271,7 @@ export default experimental_defineHostEntry({
       const version = driver ? (await run(driver, ['--version'], 15_000)).stdout.trim().replace(/^cua-driver\s+/, '') || null : null;
       return { platform: process.platform, arch: arch(), driver, version };
     },
-    call: async ({ tool, args, session, wantImage, maxImageWidth }) => {
+    call: async ({ tool, args, session, wantImage, maxImageWidth, display }) => {
       const driver = await requireDriver();
       // Arguments must be one JSON object; the driver validates the tool's own schema.
       const parsed: unknown = JSON.parse(args || '{}');
@@ -230,6 +281,11 @@ export default experimental_defineHostEntry({
       // snapshot (and its element tokens) is gone by the next call.
       if (session && input.session === undefined && (await schemaOf(driver, tool))?.props.session) input.session = session;
       await ensureDaemon(driver);
+      const visible = !!(display?.show && session);
+      if (session) await prepareCursor(driver, session, visible).catch(() => undefined);
+      if (visible) await showOverlay(display!.label, lastPos.get(session!) ?? null, 30_000).catch(() => undefined);
+      if (display?.foreground && typeof input.pid === 'number' && !['bring_to_front', 'list_apps', 'list_windows', 'launch_app'].includes(tool))
+        await driverJson(driver, 'bring_to_front', { pid: input.pid, ...(session ? { session } : {}) });
       const dir = await mkdtemp(join(tmpdir(), 'bb-mac-cu-'));
       try {
         const png = join(dir, 'shot.png');
@@ -243,6 +299,11 @@ export default experimental_defineHostEntry({
           r = await run(driver, argv);
         }
         const image = wantImage ? await loadImage(png, dir, maxImageWidth) : null;
+        if (visible) {
+          const pos = (await cursorPosition(driver, session!).catch(() => null)) ?? lastPos.get(session!) ?? null;
+          if (pos) lastPos.set(session!, pos);
+          await showOverlay(display!.label, pos, 6000).catch(() => undefined);
+        }
         return { ok: r.code === 0, exitCode: r.code, text: clip(joinOut(r)), image };
       } finally {
         await rm(dir, { recursive: true, force: true });

@@ -2,6 +2,13 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/), versions: [SemVer](https://semver.org/). Git tags: `vX.Y.Z`.
 
+## [0.3.2] — 2026-11-18
+
+### Added
+- Visible mode: the driver's agent cursor (glow, click ripple) plus a click-through, non-activating caption overlay «BB · <project>: <step>» that fades out after a few seconds.
+- Optional `step` argument on `mac_action` and `mac_screenshot` for the caption; readable defaults by tool and app.
+- Per-computer settings «Show agent actions» (on by default) and «Bring window to front» (off by default).
+
 ## [0.3.1] — 2026-11-18
 
 ### Added

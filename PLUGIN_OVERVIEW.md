@@ -6,6 +6,7 @@ Agents follow a **command line first** rule: shell and `osascript` through `bb t
 
 - Agent tools `mac_screenshot`, `mac_action` and `mac_tool_info`. The target Mac is always named explicitly with the `machine` argument.
 - A settings screen, **Computers and access**: grant or revoke GUI access per computer, allow screen viewing, in-app actions and coordinate mouse input separately, limit agents to a list of apps, and review a journal of GUI actions with their reasons.
+- A visible mode: a highlighted agent cursor and a caption «BB · agent: step» on the Mac screen, without stealing focus.
 - One-click install or update of Cua Driver on a Mac, macOS permission status with a guided fix, and a connection check that shows a live screenshot.
 - A bundled skill that teaches agents the observe → act → verify loop and the safety rules.
 

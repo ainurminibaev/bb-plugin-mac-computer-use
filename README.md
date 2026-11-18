@@ -14,12 +14,16 @@ Agents follow a ladder and pick the lowest rung that works:
 
 GUI tools require a `why_gui` argument: the agent states why the command line and scripting were not enough. The settings screen keeps a journal of GUI actions with these reasons. This plugin controls GUI access only; command access through `bb terminal` is governed by BB itself.
 
+## Visible mode
+
+While an agent works, the Mac shows it: the driver's agent cursor is highlighted (glow, click ripple) and a blue caption «BB · <project>: <step>» appears next to it, fading out after a few seconds. The caption is a click-through, non-activating overlay above all windows; it never takes focus. Agents pass a short `step` text; without it a default is built from the tool and app. Per computer: «Show agent actions» (on by default) and «Bring window to front» (off by default — background work stays the norm).
+
 ## Agent tools
 
 | Tool | Purpose |
 | --- | --- |
-| `mac_screenshot {machine, pid?, window_id?, why_gui}` | Full-screen screenshot, or one window with its accessibility tree and `snapshot_id`. |
-| `mac_action {machine, tool, args, why_gui}` | Any Cua Driver tool: `list_windows`, `launch_app`, `click`, `type_text`, `hotkey`, `scroll`, `run_steps`, … |
+| `mac_screenshot {machine, pid?, window_id?, why_gui, step?}` | Full-screen screenshot, or one window with its accessibility tree and `snapshot_id`. |
+| `mac_action {machine, tool, args, why_gui, step?}` | Any Cua Driver tool: `list_windows`, `launch_app`, `click`, `type_text`, `hotkey`, `scroll`, `run_steps`, … |
 | `mac_tool_info {machine, tool?}` | Tool list, a tool's arguments, or `status` (driver, macOS permissions, granted access). |
 
 `machine` is a BB machine id (`host_…`) or its exact name. The bundled skill `mac-computer-use` teaches agents the observe → act → verify loop and the safety rules (no sending, buying, deleting or publishing without the user's confirmation; never type passwords).
@@ -37,7 +41,7 @@ A computer that is not listed in the access policy is denied. Tools `kill_app`, 
 ## Install
 
 ```sh
-bb plugin install git:https://github.com/ainurminibaev/bb-plugin-mac-computer-use.git@^0.3.1
+bb plugin install git:https://github.com/ainurminibaev/bb-plugin-mac-computer-use.git@^0.3.2
 ```
 
 Then open Settings → Mac Computer Use, install Cua Driver on your Mac, grant the two permissions on the Mac (System Settings → Privacy & Security → Accessibility and Screen & System Audio Recording → CuaDriver), enable access and run the connection check. Agent tools appear in new agent sessions.
