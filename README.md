@@ -37,7 +37,7 @@ A computer that is not listed in the access policy is denied. Tools `kill_app`, 
 ## Install
 
 ```sh
-bb plugin install git:https://github.com/ainurminibaev/bb-plugin-mac-computer-use.git@^0.3.0
+bb plugin install git:https://github.com/ainurminibaev/bb-plugin-mac-computer-use.git@^0.3.1
 ```
 
 Then open Settings → Mac Computer Use, install Cua Driver on your Mac, grant the two permissions on the Mac (System Settings → Privacy & Security → Accessibility and Screen & System Audio Recording → CuaDriver), enable access and run the connection check. Agent tools appear in new agent sessions.
@@ -62,4 +62,4 @@ Release steps:
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Cua Driver is a separate MIT-licensed project by Cua AI, Inc.
+MIT — see [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Cua Driver is a separate MIT-licensed project by Cua AI, Inc.

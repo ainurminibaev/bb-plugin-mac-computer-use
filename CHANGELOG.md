@@ -2,6 +2,11 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/), versions: [SemVer](https://semver.org/). Git tags: `vX.Y.Z`.
 
+## [0.3.1] — 2026-11-18
+
+### Added
+- `THIRD_PARTY_NOTICES.md`: licenses of bundled and runtime dependencies, scaffolded UI components and the separately installed Cua Driver; trademark notice.
+
 ## [0.3.0] — 2026-11-18
 
 ### Added

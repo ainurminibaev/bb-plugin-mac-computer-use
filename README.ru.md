@@ -37,7 +37,7 @@ GUI-инструменты требуют аргумент `why_gui`: агент
 ## Установка
 
 ```sh
-bb plugin install git:https://github.com/ainurminibaev/bb-plugin-mac-computer-use.git@^0.3.0
+bb plugin install git:https://github.com/ainurminibaev/bb-plugin-mac-computer-use.git@^0.3.1
 ```
 
 Затем Settings → Mac Computer Use: установить Cua Driver на Mac, на самом Mac включить два разрешения («Системные настройки → Конфиденциальность и безопасность → Универсальный доступ» и «Запись экрана и системного звука» → CuaDriver), включить доступ и нажать «Проверить связь». Инструменты появляются в новых сессиях агентов.
@@ -62,4 +62,4 @@ bb plugin install git:https://github.com/ainurminibaev/bb-plugin-mac-computer-us
 
 ## Лицензия
 
-MIT — см. [LICENSE](LICENSE). Cua Driver — отдельный проект Cua AI, Inc. под MIT.
+MIT — см. [LICENSE](LICENSE) и [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Cua Driver — отдельный проект Cua AI, Inc. под MIT.
