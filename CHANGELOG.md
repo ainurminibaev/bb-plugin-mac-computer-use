@@ -2,6 +2,16 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/), versions: [SemVer](https://semver.org/). Git tags: `vX.Y.Z`.
 
+## [0.4.2] — 2026-11-19
+
+### Fixed
+- One pointer only: the drawn agent arrow is gone; a soft blue glow sits under the real system pointer with the «BB · <agent>» label (the system pointer is never hidden, so it cannot get stuck invisible).
+
+### Performance
+- Plugin overhead per call: ~1.0–1.7 s → ~0.2 s inside BB (driver ~0.12 s): cached Mac lookup, app identity, goal and driver health; the journal is written in the background; the target app is not re-activated on every step.
+- Pointer glide 0.45 s → 0.3 s.
+- Skill: batch known steps in one `run_steps` addressed by name (no snapshot), narrow window trees with `query`, skip `list_windows` when `run_steps` can find the app.
+
 ## [0.4.1] — 2026-11-18
 
 ### Changed

@@ -43,7 +43,13 @@ async function requireDriver(): Promise<string> {
 }
 
 /** Starts the CuaDriver app (in the background, no focus change) when its daemon is not running. */
+let daemonOkAt = 0;
 async function ensureDaemon(driver: string): Promise<void> {
+  if (Date.now() - daemonOkAt < 20_000) return;      // a healthy daemon was seen moments ago
+  await ensureDaemonUncached(driver);
+  daemonOkAt = Date.now();
+}
+async function ensureDaemonUncached(driver: string): Promise<void> {
   // `status` prints "not running" on stderr: test for the positive line instead.
   const running = async () => /daemon is running/i.test((await run(driver, ['status'], 15_000)).stdout);
   if (await running()) return;
@@ -224,6 +230,7 @@ const OVERLAY_STATE = join(OVERLAY_DIR, 'overlay-state.json');
 const OVERLAY_PID = join(OVERLAY_DIR, 'overlay.pid');
 const MOVE_ACK = join(OVERLAY_DIR, 'move-ack.json');
 let overlaySeq = Date.now();
+let frontPid = 0, frontAt = 0;
 let legacyCleaned = false;
 const cursorReady = new Set<string>();
 const lastPos = new Map<string, { x: number; y: number }>();
@@ -266,7 +273,13 @@ type OverlayOpts = { theme: string; move?: Point | null; halo?: boolean; avoid?:
 const progress = new Map<string, { n: number; startedAt: number }>();
 
 /** One overlay process at a time: the pid file owner, started by this host worker (it exits when the worker dies). */
+let overlayOkAt = 0;
 async function ensureOverlay(): Promise<void> {
+  if (Date.now() - overlayOkAt < 3000) return;        // checked moments ago: one overlay per session
+  await ensureOverlayUncached();
+  overlayOkAt = Date.now();
+}
+async function ensureOverlayUncached(): Promise<void> {
   if (!legacyCleaned) {
     legacyCleaned = true;
     // Overlays from 0.3.x had no pid file and could linger; stop them once.
@@ -298,7 +311,7 @@ async function showOverlay(caption: Caption, pos: Point | null, ttlMs: number, o
   if (opts.count) pr.n++;
   progress.set(caption.session, pr);
   const tmp = `${OVERLAY_STATE}.tmp`;
-  await writeFile(tmp, JSON.stringify({ seq, ...caption, label: caption.label ?? 'BB', n: pr.n, startedAt: pr.startedAt, x: pos?.x ?? null, y: pos?.y ?? null, ttlMs, theme: opts.theme, move: opts.move ? { ...opts.move, ms: 450 } : null }));
+  await writeFile(tmp, JSON.stringify({ seq, ...caption, label: caption.label ?? 'BB', n: pr.n, startedAt: pr.startedAt, x: pos?.x ?? null, y: pos?.y ?? null, ttlMs, theme: opts.theme, move: opts.move ? { ...opts.move, ms: 300 } : null }));
   await rename(tmp, OVERLAY_STATE);
   await ensureOverlay();
   if (!opts.move) return;
@@ -447,8 +460,10 @@ export default experimental_defineHostEntry({
       if (caption) await showOverlay(caption, target, 30_000, { ...opts, move: target, avoid, count: true }).catch(() => undefined);
       // Visible mode: keep the target app in front so the user sees the action
       // (a bare foreground delivery would restore the previous app afterwards).
-      if (realMouse && typeof input.pid === 'number' && !['bring_to_front', 'list_apps', 'list_windows', 'launch_app', 'get_window_state', 'get_desktop_state', 'zoom'].includes(tool))
+      if (realMouse && typeof input.pid === 'number' && (input.pid !== frontPid || Date.now() - frontAt > 5000) && !['bring_to_front', 'list_apps', 'list_windows', 'launch_app', 'get_window_state', 'get_desktop_state', 'zoom'].includes(tool)) {
         await driverJson(driver, 'bring_to_front', { pid: input.pid, ...(session ? { session } : {}) });
+        frontPid = input.pid; frontAt = Date.now();     // already in front: skip for the next few seconds
+      }
       if (display?.foreground && !realMouse && typeof input.pid === 'number' && !['bring_to_front', 'list_apps', 'list_windows', 'launch_app'].includes(tool))
         await driverJson(driver, 'bring_to_front', { pid: input.pid, ...(session ? { session } : {}) });
       const dir = await mkdtemp(join(tmpdir(), 'bb-mac-cu-'));
@@ -459,6 +474,7 @@ export default experimental_defineHostEntry({
         let r = await run(driver, argv);
         // The daemon can report itself up a moment before its socket accepts calls.
         if (r.code !== 0 && /daemon is not running/i.test(r.stdout + r.stderr)) {
+          daemonOkAt = 0;
           await new Promise(res => setTimeout(res, 1500));
           await ensureDaemon(driver);
           r = await run(driver, argv);

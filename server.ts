@@ -84,7 +84,16 @@ export default function plugin(bb: BbPluginApi) {
   }
 
   /** Resolves an explicit machine reference to a connected macOS host with the driver. */
+  // Machine lookups cost a host round trip each; keep a verified Mac for a minute.
+  const macCache = new Map<string, { at: number; value: { id: string; name: string } }>();
   async function resolveMac(ref: string): Promise<{ id: string; name: string }> {
+    const hit = macCache.get(ref);
+    if (hit && Date.now() - hit.at < 60_000) return hit.value;
+    const value = await resolveMacUncached(ref);
+    macCache.set(ref, { at: Date.now(), value });
+    return value;
+  }
+  async function resolveMacUncached(ref: string): Promise<{ id: string; name: string }> {
     const machines = await bb.sdk.hosts.list();
     const needle = normName(ref);
     let match = machines.filter(h => h.id === ref.trim() || normName(h.name) === needle);
@@ -119,6 +128,18 @@ export default function plugin(bb: BbPluginApi) {
     return r.ok ? { content } : { content, isError: true };
   }
 
+  // pid → app identity rarely changes; cache it for a minute per Mac.
+  const appCache = new Map<string, { at: number; app: { pid: number; bundleId: string | null; name: string | null } }>();
+  async function appsOf(hostId: string, pids: number[]) {
+    const now = Date.now();
+    const missing = pids.filter(p => { const h = appCache.get(`${hostId}:${p}`); return !h || now - h.at > 60_000; });
+    if (missing.length) {
+      const { apps } = await host.call('apps', { pids: missing }, { hostId });
+      for (const a of apps) appCache.set(`${hostId}:${a.pid}`, { at: now, app: a });
+    }
+    return { apps: pids.map(p => appCache.get(`${hostId}:${p}`)?.app).filter((a): a is { pid: number; bundleId: string | null; name: string | null } => !!a) };
+  }
+
   async function denied(tool: string): Promise<boolean> {
     const { deniedTools } = await settings.get();
     return String(deniedTools).split(',').map(s => s.trim()).filter(Boolean).includes(tool);
@@ -126,13 +147,14 @@ export default function plugin(bb: BbPluginApi) {
 
   /** Policy check + app allowlist + driver call, all in one place for both agent tools. */
   async function guardedCall(machine: string, threadId: string, tool: string, args: Record<string, unknown>, why: string, step?: string, goal?: string): Promise<ToolResult> {
+    const t0 = Date.now();
     if (await denied(tool)) return fail(`Инструмент ${tool} запрещён настройкой плагина Mac Computer Use (deniedTools).`);
     const target = await resolveMac(machine);
     const policy = await policyOf(target.id);
     const decision = decide(policy, tool, args);
     if (!decision.ok) { await journal({ machine: target.name, threadId, tool, why, result: `отказ: ${decision.reason}` }); return fail(`[${target.name}] ${decision.reason}`); }
     const pidsForName = decision.pids.length ? decision.pids : collectPids(args).slice(0, 1);
-    const { apps } = pidsForName.length ? await host.call('apps', { pids: pidsForName }, { hostId: target.id }) : { apps: [] };
+    const { apps } = pidsForName.length ? await appsOf(target.id, pidsForName) : { apps: [] };
     if (decision.pids.length) {
       const blocked = apps.filter(a => !appAllowed(policy, a));
       if (blocked.length) { await journal({ machine: target.name, threadId, tool, why, result: 'отказ: приложение не разрешено' }); return fail(`[${target.name}] Приложение ${blocked.map(a => a.bundleId ?? a.name ?? a.pid).join(', ')} не входит в список разрешённых (${policy.apps.join(', ')}).`); }
@@ -140,7 +162,7 @@ export default function plugin(bb: BbPluginApi) {
     const { maxImageWidth } = await settings.get();
     const session = `bb-${threadId}`.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 64);
     const appName = apps[0]?.name ?? (typeof args.app === 'string' ? args.app : null) ?? (decision.launchTarget ?? null);
-    if (goal) await bb.storage.kv.set(`goal:${threadId}`, goal).catch(() => undefined);
+    if (goal) { goals.set(threadId, goal); void bb.storage.kv.set(`goal:${threadId}`, goal).catch(() => undefined); }
     const lines = caption(await agentName(threadId), await goalOf(threadId), tool, step, appName);
     const { overlayTheme } = await settings.get();
     const theme = (['dark', 'light', 'accent'].includes(String(overlayTheme)) ? overlayTheme : 'dark') as 'dark' | 'light' | 'accent';
@@ -150,19 +172,28 @@ export default function plugin(bb: BbPluginApi) {
     const display = { show: policy.showActions, foreground: policy.foreground, realMouse: policy.realMouse && policy.pointer && policy.input, theme, label: agentLabel, ...lines };
     // Pictures cost the most: return one only for the desktop, a zoom, or a window snapshot that asked for it.
     const wantImage = policy.screen && (tool === 'get_desktop_state' || tool === 'zoom' || (tool === 'get_window_state' && args.include_screenshot !== false));
+    const tHost = Date.now();
     const r = await host.call('call', { tool, args: JSON.stringify(args), session, wantImage, maxImageWidth: Number(maxImageWidth) || 1568, display }, { hostId: target.id, timeoutMs: 180_000 });
     if (r.text.startsWith('STOPPED_BY_USER')) {
       await journal({ machine: target.name, threadId, tool, why, result: 'остановлено пользователем' });
       return fail(`[${target.name}] Пользователь нажал «Остановить агента» на Mac: GUI-доступ для этого треда отозван. Не повторяй GUI-действия и не обходи остановку; сообщи пользователю и жди его решения (снять остановку можно в настройках плагина).`);
     }
-    await journal({ machine: target.name, threadId, tool, why, result: r.ok ? 'ok' : `ошибка ${r.exitCode}` });
+    void journal({ machine: target.name, threadId, tool, why, result: r.ok ? 'ok' : `ошибка ${r.exitCode}` });
+    bb.log.info(`mac-computer-use timing ${tool}: total ${Date.now() - t0} ms, before host call ${tHost - t0} ms, host call ${Date.now() - tHost} ms`);
     const res = toResult(target, tool, r);
     res.content[0] = { type: 'text', text: `Причина GUI: ${why}\n${(res.content[0] as { text: string }).text}` };
     return res;
   }
 
   /** Goal line for the caption: set once per thread by the agent, else the thread title. */
+  const goals = new Map<string, string>();
   async function goalOf(threadId: string): Promise<string> {
+    if (goals.has(threadId)) return goals.get(threadId)!;
+    const value = await goalOfUncached(threadId);
+    goals.set(threadId, value);
+    return value;
+  }
+  async function goalOfUncached(threadId: string): Promise<string> {
     const saved = await bb.storage.kv.get<string>(`goal:${threadId}`).catch(() => null);
     if (saved) return saved;
     try { return ((await bb.sdk.threads.get({ threadId }) as { title?: string | null }).title ?? '').replace(/\s+/g, ' ').trim().slice(0, 100); } catch { return ''; }

@@ -1,8 +1,8 @@
 // Overlay v3 (JXA). Kept as a string so the host bundle can write it to disk.
 export const OVERLAY_JXA = String.raw`// BB Mac Computer Use — overlay v3 (JXA): shows which agent works on this Mac and why.
 // osascript -l JavaScript overlay.jxa.js <state.json> <parentPid>
-// - agent pointer: a drawn blue arrow with a small label that rides on the REAL
-//   pointer; before an action the pointer glides to the target at 60 fps;
+// - agent pointer: a soft blue glow under the REAL pointer (no second arrow)
+//   with a small label; before an action the pointer glides to the target at 60 fps;
 // - session HUD: a translucent bar above the Dock (draggable, position kept)
 //   with goal, live progress (spinner, step number, current step, elapsed time)
 //   and a Stop button; visible for the whole session, hidden on session end,
@@ -58,13 +58,13 @@ function run(argv) {
     const img = $.NSImage.alloc.initWithSize($.NSMakeSize(PW, PH));
     img.lockFocus;
     const Y = y => PH - y;
-    const pts = [[0, 0], [0, 21], [5.2, 16.2], [9, 25], [12.6, 23.4], [8.9, 14.8], [15.6, 14.8]];
-    const path = $.NSBezierPath.bezierPath;
-    pts.forEach((p, i) => { const q = $.NSMakePoint(TIP.x + p[0], Y(TIP.y + p[1])); if (i) path.lineToPoint(q); else path.moveToPoint(q); });
-    path.closePath; path.setLineJoinStyle(1);
-    const sh = $.NSShadow.alloc.init; sh.setShadowBlurRadius(5); sh.setShadowOffset($.NSMakeSize(0, -1)); sh.setShadowColor(C([0, 0, 0, 0.35]));
-    $.NSGraphicsContext.saveGraphicsState; sh.set; C(T.accent).setFill; path.fill; $.NSGraphicsContext.restoreGraphicsState;
-    C([1, 1, 1, 1]).setStroke; path.setLineWidth(1.6); path.stroke;
+    // One pointer only: no drawn arrow. A soft blue glow sits under the body of
+    // the real system pointer (which macOS draws on top) and a label follows it.
+    const gx = TIP.x + 7, gy = TIP.y + 11;
+    for (let r = 17; r >= 3; r -= 2) {
+      C([T.accent[0], T.accent[1], T.accent[2], 0.05]).setFill;
+      $.NSBezierPath.bezierPathWithOvalInRect($.NSMakeRect(gx - r, Y(gy) - r, 2 * r, 2 * r)).fill;
+    }
     if (label) {
       const f = $.NSFont.systemFontOfSizeWeight(11, 0.4);
       const attrs = $.NSDictionary.dictionaryWithObjectsForKeys($([f, C([1, 1, 1, 1])]), $(['NSFont', 'NSColor']));
@@ -130,7 +130,7 @@ function run(argv) {
   // 60 fps glide of the real pointer (ease-in-out cubic); the agent arrow rides along.
   function glide(to, ms) {
     const from = cursor();
-    const dur = reduceMotion ? 0 : Math.min(600, Math.max(300, ms || 450));
+    const dur = reduceMotion ? 0 : Math.min(400, Math.max(200, ms || 300));
     const frames = Math.max(1, Math.round(dur / 16.7));
     const t0 = Date.now();
     for (let i = 1; i <= frames; i++) {
