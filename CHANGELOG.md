@@ -8,6 +8,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/), versions: [SemVer](http
 - Session HUD instead of a caption that blinked: a translucent bar above the Dock stays visible for the whole agent session with live progress (spinner, step number, current step, elapsed time) and a Stop button; it hides when the agent's turn ends (`thread.idle` / `thread.failed` / `thread.archived`), on Stop, after 2 minutes without actions or when the host process dies. Drag it anywhere; the position is remembered.
 - Agent pointer: a drawn blue arrow with an «BB · <agent>» label rides on the real pointer for the whole session (no more circle).
 - Pointer glide is a real 60 fps animation (ease-in-out, ~0.45 s) instead of a few jumps.
+- Live check on a MacBook Pro: pointer glide measured at 453–456 ms, the app came to the front, the HUD stayed above the Dock for the whole session and closed on the turn end; Chrome → ya.ru → search succeeded in 5 agent calls without pictures (~78k context tokens, mostly the fixed system prompt); overlay ~4 % CPU and ~67 MB while visible, no process when idle.
 - Visible mode brings the target app to the front before acting (the bare foreground delivery used to restore the previous app); «Don't touch my mouse» still never activates anything.
 
 ## [0.4.0] — 2026-11-18
