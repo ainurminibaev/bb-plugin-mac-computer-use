@@ -2,6 +2,11 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/), versions: [SemVer](https://semver.org/). Git tags: `vX.Y.Z`.
 
+## [0.4.3] — 2026-11-23
+
+### Fixed
+- The session HUD's «Стоп» button and dragging the HUD did nothing: the overlay loop ran the run loop without handing mouse events to its windows. It now dispatches NSApp events itself.
+
 ## [0.4.2] — 2026-11-19
 
 ### Fixed
