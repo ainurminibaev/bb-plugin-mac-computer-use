@@ -139,3 +139,10 @@ test('stopped text is recognised by the server', () => {
   assert.equal(isStoppedText(STOPPED_TEXT), true);
   assert.equal(isStoppedText('ok'), false);
 });
+
+test('only a stop that happened during the call is fresh (it stops the BB turn)', async () => {
+  const { isFreshStop, freshStoppedText } = await import('./stop.ts');
+  assert.equal(isFreshStop(freshStoppedText()), true);
+  assert.equal(isFreshStop(STOPPED_TEXT), false);
+  assert.equal(isStoppedText(freshStoppedText()), true);
+});

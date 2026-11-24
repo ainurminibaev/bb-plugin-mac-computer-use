@@ -1,6 +1,6 @@
 import type { BbPluginApi } from '@get-bb/plugin-sdk';
 import { PluginCliError, cliCommand, defineCli } from '@get-bb/plugin-sdk';
-import { addStop, holdDispatch, isStoppedText, removeStop, resumeRefusal, sessionOf, type StoppedThreads } from './stop';
+import { addStop, holdDispatch, isFreshStop, isStoppedText, removeStop, resumeRefusal, sessionOf, type StoppedThreads } from './stop';
 import { z } from 'zod';
 import { agentRpcContract, hostContract, rpcContract, type CallResult, type MachineView } from './contract';
 import { scriptTargets } from './automation-applet';
@@ -184,7 +184,7 @@ export default function plugin(bb: BbPluginApi) {
       throw e;
     }
     if (isStoppedText(r.text)) {
-      await onMacStop(target, threadId, tool, why);
+      await onMacStop(target, threadId, tool, why, isFreshStop(r.text));
       return fail(STOPPED_MESSAGE(target.name));
     }
     void journal({ machine: target.name, threadId, tool, why, result: r.ok ? 'ok' : `ошибка ${r.exitCode}` });
@@ -278,11 +278,15 @@ export default function plugin(bb: BbPluginApi) {
     try { await bb.sdk.threads.stop({ threadId }); return true; } catch { return false; }
   }
 
-  /** The Mac answered «stopped» (HUD Stop click or an earlier stop): block, journal, stop the BB turn. */
-  async function onMacStop(target: { id: string; name: string }, threadId: string, tool: string, why: string): Promise<void> {
-    await journal({ machine: target.name, threadId, tool, why, result: 'остановлено пользователем' });
+  /**
+   * The Mac answered «stopped»: block and journal. A fresh stop (HUD click, abort
+   * in flight) also stops the BB turn; a call refused by an earlier stop does not,
+   * so the user can still talk to the thread.
+   */
+  async function onMacStop(target: { id: string; name: string }, threadId: string, tool: string, why: string, fresh: boolean): Promise<void> {
+    await journal({ machine: target.name, threadId, tool, why, result: fresh ? 'остановлено пользователем' : 'отказ: тред остановлен' });
     await rememberStop(threadId, target.id);
-    void stopBbThread(threadId);
+    if (fresh) void stopBbThread(threadId);
   }
 
   /** BB stopped the thread or cancelled the call mid-action: the Mac call was aborted; block until resume. */
@@ -420,7 +424,7 @@ export default function plugin(bb: BbPluginApi) {
         throw e;
       }
       if (isStoppedText(r.text)) {
-        await onMacStop(target, threadId, 'applescript', why);
+        await onMacStop(target, threadId, 'applescript', why, isFreshStop(r.text));
         return fail(STOPPED_MESSAGE(target.name));
       }
       await journal({ machine: target.name, threadId, tool: 'applescript', why, result: r.ok ? 'ok' : r.timedOut ? 'нет ответа (ждёт системного запроса?)' : 'ошибка' });

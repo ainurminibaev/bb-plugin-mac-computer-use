@@ -9,7 +9,7 @@ import { OVERLAY_JXA } from './overlay-script';
 import { Geometry } from './geometry';
 import { APPLET_BUNDLE_ID, APPLET_NAME, APPLET_SOURCE, APPLET_VERSION } from './automation-applet';
 import { createHash, randomUUID } from 'node:crypto';
-import { Inflight, STOPPED_TEXT, StopRegistry } from './stop';
+import { Inflight, STOPPED_TEXT, StopRegistry, freshStoppedText } from './stop';
 
 const MAX_TEXT = 60_000;
 const APP = '/Applications/CuaDriver.app';
@@ -437,7 +437,7 @@ async function runAppleScript(script: string, timeoutMs: number, signal?: AbortS
     // The helper runs the script in its own process (the request path is its last argument): kill it on Stop or timeout.
     const kill = () => run('/usr/bin/pkill', ['-f', req], 10_000);
     while (Date.now() < until) {
-      if (signal?.aborted) { await kill(); return { ok: false, text: STOPPED_TEXT, timedOut: false, aborted: true }; }
+      if (signal?.aborted) { await kill(); return { ok: false, text: freshStoppedText(), timedOut: false, aborted: true }; }
       try {
         const text = await readFile(out, 'utf8');
         const ok = text.startsWith('OK');
@@ -470,9 +470,12 @@ export default experimental_defineHostEntry({
       // snapshot (and its element tokens) is gone by the next call.
       if (session && input.session === undefined && (await schemaOf(driver, tool))?.props.session) input.session = session;
       await ensureDaemon(driver);
-      if (session && await stops.isStopped(session)) {
-        await prepareCursor(driver, session, false).catch(() => undefined);
-        return { ok: false, exitCode: 75, text: STOPPED_TEXT, image: null };
+      if (session) {
+        const fresh = (await stops.pendingClick()) === session;    // the HUD click is being collected right now
+        if (await stops.isStopped(session)) {
+          await prepareCursor(driver, session, false).catch(() => undefined);
+          return { ok: false, exitCode: 75, text: fresh ? freshStoppedText() : STOPPED_TEXT, image: null };
+        }
       }
       // From here the call can be cut short: HUD «Stop», `stop` RPC, BB thread stop (ctx.signal).
       const flight = inflight.begin(session ?? '', ctx?.signal);
@@ -509,7 +512,7 @@ export default experimental_defineHostEntry({
           const png = join(dir, 'shot.png');
           const argv = ['call', tool, JSON.stringify(input)];
           if (wantImage) argv.push('--screenshot-out-file', png);
-          const stoppedResult = { ok: false, exitCode: 75, text: STOPPED_TEXT, image: null };
+          const stoppedResult = { ok: false, exitCode: 75, text: freshStoppedText(), image: null };
           if (signal.aborted) return stoppedResult;
           const key = session ?? '';
           // A running driver action (a run_steps batch especially) ends only when the daemon stops.
@@ -587,7 +590,10 @@ export default experimental_defineHostEntry({
       if (process.platform !== 'darwin') throw new Error('Не macOS.');
       // The thread's session is checked even when the HUD is off.
       const session = sessionIn ?? display?.session ?? null;
-      if (session && await stops.isStopped(session)) return { ok: false, text: STOPPED_TEXT, timedOut: false };
+      if (session) {
+        const fresh = (await stops.pendingClick()) === session;
+        if (await stops.isStopped(session)) return { ok: false, text: fresh ? freshStoppedText() : STOPPED_TEXT, timedOut: false };
+      }
       if (display) await showOverlay(display, null, timeoutMs, { theme: display.theme ?? 'dark', count: true }).catch(() => undefined);
       const flight = inflight.begin(session ?? '', ctx?.signal);
       watchStops();

@@ -137,6 +137,10 @@ export class Inflight {
 
 export const STOPPED_TEXT = 'STOPPED_BY_USER: агент остановлен на этом Mac; GUI-доступ этого треда отозван до явного «Разрешить снова».';
 export const isStoppedText = (text: string) => text.startsWith('STOPPED_BY_USER');
+/** Marks a stop that happened during this call (HUD click, abort in flight), not an earlier one. */
+export const FRESH_MARK = ' [остановлено сейчас]';
+export const freshStoppedText = () => STOPPED_TEXT + FRESH_MARK;
+export const isFreshStop = (text: string) => isStoppedText(text) && text.includes(FRESH_MARK);
 
 // ---- BB server side: threads stopped on a Mac, and their queued messages ----
 
