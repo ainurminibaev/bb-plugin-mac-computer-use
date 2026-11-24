@@ -1,4 +1,6 @@
 import type { BbPluginApi } from '@get-bb/plugin-sdk';
+import { PluginCliError, cliCommand, defineCli } from '@get-bb/plugin-sdk';
+import { addStop, holdDispatch, isStoppedText, removeStop, resumeRefusal, sessionOf, type StoppedThreads } from './stop';
 import { z } from 'zod';
 import { agentRpcContract, hostContract, rpcContract, type CallResult, type MachineView } from './contract';
 import { scriptTargets } from './automation-applet';
@@ -146,7 +148,7 @@ export default function plugin(bb: BbPluginApi) {
   }
 
   /** Policy check + app allowlist + driver call, all in one place for both agent tools. */
-  async function guardedCall(machine: string, threadId: string, tool: string, args: Record<string, unknown>, why: string, step?: string, goal?: string): Promise<ToolResult> {
+  async function guardedCall(machine: string, threadId: string, tool: string, args: Record<string, unknown>, why: string, step?: string, goal?: string, signal?: AbortSignal): Promise<ToolResult> {
     const t0 = Date.now();
     if (await denied(tool)) return fail(`Инструмент ${tool} запрещён настройкой плагина Mac Computer Use (deniedTools).`);
     const target = await resolveMac(machine);
@@ -173,10 +175,17 @@ export default function plugin(bb: BbPluginApi) {
     // Pictures cost the most: return one only for the desktop, a zoom, or a window snapshot that asked for it.
     const wantImage = policy.screen && (tool === 'get_desktop_state' || tool === 'zoom' || (tool === 'get_window_state' && args.include_screenshot !== false));
     const tHost = Date.now();
-    const r = await host.call('call', { tool, args: JSON.stringify(args), session, wantImage, maxImageWidth: Number(maxImageWidth) || 1568, display }, { hostId: target.id, timeoutMs: 180_000 });
-    if (r.text.startsWith('STOPPED_BY_USER')) {
-      await journal({ machine: target.name, threadId, tool, why, result: 'остановлено пользователем' });
-      return fail(`[${target.name}] Пользователь нажал «Остановить агента» на Mac: GUI-доступ для этого треда отозван. Не повторяй GUI-действия и не обходи остановку; сообщи пользователю и жди его решения (снять остановку можно в настройках плагина).`);
+    if (signal?.aborted) return stoppedByBb(target, threadId, tool, why);
+    let r: CallResult;
+    try {
+      r = await host.call('call', { tool, args: JSON.stringify(args), session, wantImage, maxImageWidth: Number(maxImageWidth) || 1568, display }, { hostId: target.id, timeoutMs: 180_000, ...(signal ? { signal } : {}) });
+    } catch (e) {
+      if (signal?.aborted) return stoppedByBb(target, threadId, tool, why);
+      throw e;
+    }
+    if (isStoppedText(r.text)) {
+      await onMacStop(target, threadId, tool, why);
+      return fail(STOPPED_MESSAGE(target.name));
     }
     void journal({ machine: target.name, threadId, tool, why, result: r.ok ? 'ok' : `ошибка ${r.exitCode}` });
     bb.log.info(`mac-computer-use timing ${tool}: total ${Date.now() - t0} ms, before host call ${tHost - t0} ms, host call ${Date.now() - tHost} ms`);
@@ -241,8 +250,154 @@ export default function plugin(bb: BbPluginApi) {
     } catch { /* the journal never blocks an action */ }
   }
 
+  // ---- Stop agent: in flight, the queue, and the block until an explicit resume ----
+
+  const STOPPED_MESSAGE = (mac: string) => `[${mac}] Агент остановлен на Mac (кнопка «Стоп», остановка треда или bb mac-computer-use stop): действие прервано, доступ этого треда к Mac отозван до явного «Разрешить снова». Не повторяй действия на Mac и не обходи остановку — ни через bb terminal, ни через browser-relay, ни через osascript; сообщи пользователю и жди его решения.`;
+
+  /** Threads stopped on some Mac, cached in memory: the dispatch hook must answer in milliseconds. */
+  let stoppedThreads: StoppedThreads = {};
+  const stoppedLoaded = bb.storage.kv.get<StoppedThreads>('stopped-threads').then(v => { stoppedThreads = v ?? {}; }).catch(() => undefined);
+  async function saveStopped(next: StoppedThreads): Promise<void> {
+    stoppedThreads = next;
+    await bb.storage.kv.set('stopped-threads', next).catch(() => undefined);
+  }
+  async function rememberStop(threadId: string, hostId: string): Promise<void> {
+    await stoppedLoaded;
+    await saveStopped(addStop(stoppedThreads, threadId, hostId));
+  }
+  async function forgetStop(threadId: string, hostId: string | null): Promise<void> {
+    await stoppedLoaded;
+    const had = !!stoppedThreads[threadId];
+    await saveStopped(removeStop(stoppedThreads, threadId, hostId ? [hostId] : null));
+    // The thread is free again: let its held queue go.
+    if (had && !stoppedThreads[threadId]) await bb.experimental_hooks.recheck('message.dispatch').catch(() => undefined);
+  }
+
+  /** Stops the BB thread itself: its terminal commands and other tools end with it. */
+  async function stopBbThread(threadId: string): Promise<boolean> {
+    try { await bb.sdk.threads.stop({ threadId }); return true; } catch { return false; }
+  }
+
+  /** The Mac answered «stopped» (HUD Stop click or an earlier stop): block, journal, stop the BB turn. */
+  async function onMacStop(target: { id: string; name: string }, threadId: string, tool: string, why: string): Promise<void> {
+    await journal({ machine: target.name, threadId, tool, why, result: 'остановлено пользователем' });
+    await rememberStop(threadId, target.id);
+    void stopBbThread(threadId);
+  }
+
+  /** BB stopped the thread or cancelled the call mid-action: the Mac call was aborted; block until resume. */
+  async function stoppedByBb(target: { id: string; name: string }, threadId: string, tool: string, why: string): Promise<ToolResult> {
+    await host.call('stop', { session: sessionOf(threadId) }, { hostId: target.id, timeoutMs: 30_000 }).catch(e => bb.log.warn(`mac-computer-use: stop on ${target.id} failed: ${e}`));
+    await rememberStop(threadId, target.id);
+    await journal({ machine: target.name, threadId, tool, why, result: 'прервано остановкой треда' });
+    return fail(STOPPED_MESSAGE(target.name));
+  }
+
+  /** Connected Macs with the driver, or the given ones. */
+  async function macsFor(hostIds: string[] | null): Promise<{ id: string; name: string }[]> {
+    const all = (await bb.sdk.hosts.list()).filter(h => h.status === 'connected' && (!hostIds || hostIds.includes(h.id)));
+    const out: { id: string; name: string }[] = [];
+    for (const h of all) {
+      const info = await host.call('info', null, { hostId: h.id, timeoutMs: 15_000 }).catch(() => null);
+      if (info?.platform === 'darwin') out.push({ id: h.id, name: h.name });
+    }
+    return out;
+  }
+
+  async function stopThread(threadId: string, hostIds: string[] | null, by: string): Promise<{ ok: boolean; text: string }> {
+    const macs = await macsFor(hostIds);
+    const lines: string[] = [];
+    for (const m of macs) {
+      try {
+        const r = await host.call('stop', { session: sessionOf(threadId) }, { hostId: m.id, timeoutMs: 30_000 });
+        await rememberStop(threadId, m.id);
+        await journal({ machine: m.name, threadId, tool: 'stop', why: by, result: r.aborted ? `остановлено, прервано действий: ${r.aborted}` : 'остановлено' });
+        lines.push(`${m.name} (${m.id}): остановлено${r.aborted ? `, прервано действий в полёте: ${r.aborted}` : ''}`);
+      } catch (e) {
+        lines.push(`${m.name} (${m.id}): НЕ остановлено — ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    const threadStopped = await stopBbThread(threadId);
+    lines.push(threadStopped ? `Тред ${threadId}: ход остановлен; сообщения агентов и автоматизаций ждут возобновления.` : `Тред ${threadId}: ход не остановлен (не найден или уже стоит).`);
+    if (!macs.length) lines.unshift(hostIds ? 'Mac не на связи: остановка на нём не записана.' : 'Подключённых Mac нет.');
+    const ok = macs.length > 0 && lines.every(l => !l.includes('НЕ остановлено'));
+    return { ok, text: lines.join('\n') };
+  }
+
+  async function resumeThread(threadId: string, hostIds: string[] | null): Promise<{ ok: boolean; text: string }> {
+    await stoppedLoaded;
+    const macs = await macsFor(hostIds ?? stoppedThreads[threadId]?.hosts ?? null);
+    const lines: string[] = [];
+    for (const m of macs) {
+      try {
+        await host.call('unstop', { session: sessionOf(threadId) }, { hostId: m.id, timeoutMs: 30_000 });
+        await forgetStop(threadId, m.id);
+        await journal({ machine: m.name, threadId, tool: 'resume', why: 'разрешено снова', result: 'ok' });
+        lines.push(`${m.name} (${m.id}): разрешено снова`);
+      } catch (e) {
+        lines.push(`${m.name} (${m.id}): не снято — ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    if (!hostIds) await forgetStop(threadId, null);
+    if (!macs.length) lines.push('Подключённых Mac с остановкой нет; запись в BB снята.');
+    return { ok: lines.every(l => !l.includes('не снято')), text: lines.join('\n') };
+  }
+
+  // Queue: while a thread is stopped, messages from agents/automations wait; the user's own go through.
+  bb.experimental_hooks.on('message.dispatch', ctx => {
+    try { return holdDispatch(stoppedThreads, ctx.thread.id, String(ctx.initiator)); } catch { return { action: 'proceed' }; }
+  });
+
+  const threadOpt = { type: 'string' as const, description: 'ID треда (thr_…). По умолчанию — тред, из которого вызвана команда.' };
+  const macOpt = { type: 'string' as const, aliases: ['host'], description: 'Mac: ID (host_…) или имя. По умолчанию — все подключённые Mac.' };
+  const threadArg = (v: string | undefined, ctx: { threadId?: string }) => {
+    const t = (v ?? ctx.threadId ?? '').trim();
+    if (!/^thr_[A-Za-z0-9]{4,64}$/.test(t)) throw new PluginCliError('нужен ID треда', { code: 'thread', hint: '--thread thr_…' });
+    return t;
+  };
+  const macArg = async (v: string | undefined) => (v ? [(await resolveMac(v)).id] : null);
+  bb.cli.register(defineCli({
+    name: 'mac-computer-use',
+    summary: 'Остановка агента на Mac по ID треда: прерывает действия в полёте, держит очередь и блокирует Mac до явного возобновления.',
+    commands: {
+      stop: cliCommand({
+        summary: 'Остановить тред на Mac: прервать действие, отозвать доступ, остановить ход треда в BB',
+        options: { thread: threadOpt, machine: macOpt },
+        async run(input, ctx) {
+          const r = await stopThread(threadArg(input.options.thread, ctx), await macArg(input.options.machine), `bb mac-computer-use stop${ctx.threadId ? ` из ${ctx.threadId}` : ''}`);
+          return { exitCode: r.ok ? 0 : 1, stdout: r.text };
+        },
+      }),
+      resume: cliCommand({
+        summary: 'Разрешить треду снова действовать на Mac (снять остановку)',
+        options: { thread: { ...threadOpt, description: 'ID треда (thr_…), обязательно.' }, machine: macOpt },
+        async run(input, ctx) {
+          if (!input.options.thread) throw new PluginCliError('нужен --thread', { code: 'thread', hint: '--thread thr_…' });
+          const threadId = threadArg(input.options.thread, ctx);
+          const refusal = resumeRefusal(ctx.threadId, threadId);
+          if (refusal) throw new PluginCliError(refusal, { code: 'self_resume' });
+          const r = await resumeThread(threadId, await macArg(input.options.machine));
+          return { exitCode: r.ok ? 0 : 1, stdout: r.text };
+        },
+      }),
+      stopped: cliCommand({
+        summary: 'Остановленные треды по Mac',
+        options: { json: { type: 'boolean' as const, description: 'Вывести JSON' } },
+        async run(input) {
+          const entries: { hostId: string; machine: string; session: string; at: number }[] = [];
+          for (const m of await macsFor(null)) {
+            const { sessions } = await host.call('stopped', null, { hostId: m.id }).catch(() => ({ sessions: [] as { session: string; at: number }[] }));
+            for (const s of sessions) entries.push({ hostId: m.id, machine: m.name, session: s.session, at: s.at });
+          }
+          if (input.options.json) return { exitCode: 0, stdout: JSON.stringify(entries, null, 2) };
+          return { exitCode: 0, stdout: entries.length ? entries.map(e => `${e.machine} (${e.hostId}): ${e.session.replace(/^bb-/, '')} — с ${new Date(e.at).toISOString()}`).join('\n') : 'Остановленных тредов нет.' };
+        },
+      }),
+    },
+  }));
+
   /** AppleScript through the «BB Automation» helper, with policy, Stop agent and journal. */
-  async function runScript(machine: string, threadId: string, script: string, why: string, timeout_s: number, step?: string, goal?: string): Promise<ToolResult | string> {
+  async function runScript(machine: string, threadId: string, script: string, why: string, timeout_s: number, step?: string, goal?: string, signal?: AbortSignal): Promise<ToolResult | string> {
       const target = await resolveMac(machine);
       const policy = await policyOf(target.id);
       const targets = scriptTargets(script);
@@ -256,10 +411,17 @@ export default function plugin(bb: BbPluginApi) {
       const theme = (['dark', 'light', 'accent'].includes(String(overlayTheme)) ? overlayTheme : 'dark') as 'dark' | 'light' | 'accent';
       activeHosts(threadId).add(target.id);
       const label = `BB · ${(await agentName(threadId)) || 'агент'}`.slice(0, 60);
-      const r = await host.call('applescript', { script, timeoutMs, display: policy.showActions ? { ...lines, session, theme, label } : null }, { hostId: target.id, timeoutMs: timeoutMs + 30_000 });
-      if (r.text.startsWith('STOPPED_BY_USER')) {
-        await journal({ machine: target.name, threadId, tool: 'applescript', why, result: 'остановлено пользователем' });
-        return fail(`[${target.name}] Пользователь нажал «Остановить агента» на Mac: доступ этого треда отозван. Не повторяй и не обходи остановку.`);
+      if (signal?.aborted) return stoppedByBb(target, threadId, 'applescript', why);
+      let r: { ok: boolean; text: string; timedOut: boolean };
+      try {
+        r = await host.call('applescript', { script, timeoutMs, session, display: policy.showActions ? { ...lines, session, theme, label } : null }, { hostId: target.id, timeoutMs: timeoutMs + 30_000, ...(signal ? { signal } : {}) });
+      } catch (e) {
+        if (signal?.aborted) return stoppedByBb(target, threadId, 'applescript', why);
+        throw e;
+      }
+      if (isStoppedText(r.text)) {
+        await onMacStop(target, threadId, 'applescript', why);
+        return fail(STOPPED_MESSAGE(target.name));
       }
       await journal({ machine: target.name, threadId, tool: 'applescript', why, result: r.ok ? 'ok' : r.timedOut ? 'нет ответа (ждёт системного запроса?)' : 'ошибка' });
       const text = `[${target.name}] AppleScript → ${r.ok ? 'ok' : 'ошибка'} (приложения: ${targets.join(', ') || '—'})\n\n${r.text}`;
@@ -280,10 +442,10 @@ export default function plugin(bb: BbPluginApi) {
       step: stepParam,
       goal: goalParam,
     }),
-    async execute({ machine, pid, window_id, image, why_gui, step, goal }, { threadId }) {
+    async execute({ machine, pid, window_id, image, why_gui, step, goal }, { threadId, signal }) {
       const tool = pid !== undefined ? 'get_window_state' : 'get_desktop_state';
       const args = pid !== undefined ? { pid, ...(window_id !== undefined ? { window_id } : {}), include_screenshot: !!image, ...(image ? { max_image_dimension: 1024 } : {}) } : {};
-      return guardedCall(machine, threadId, tool, args, why_gui, step, goal);
+      return guardedCall(machine, threadId, tool, args, why_gui, step, goal, signal);
     },
   });
 
@@ -299,8 +461,8 @@ export default function plugin(bb: BbPluginApi) {
       step: stepParam,
       goal: goalParam,
     }),
-    async execute({ machine, tool, args, why_gui, step, goal }, { threadId }) {
-      return guardedCall(machine, threadId, tool, args ?? {}, why_gui, step, goal);
+    async execute({ machine, tool, args, why_gui, step, goal }, { threadId, signal }) {
+      return guardedCall(machine, threadId, tool, args ?? {}, why_gui, step, goal, signal);
     },
   });
 
@@ -316,8 +478,8 @@ export default function plugin(bb: BbPluginApi) {
       step: stepParam,
       goal: goalParam,
     }),
-    async execute({ machine, script, why, timeout_s, step, goal }, { threadId }) {
-      return runScript(machine, threadId, script, why, timeout_s ?? 60, step, goal);
+    async execute({ machine, script, why, timeout_s, step, goal }, { threadId, signal }) {
+      return runScript(machine, threadId, script, why, timeout_s ?? 60, step, goal, signal);
     },
   });
 
@@ -428,7 +590,14 @@ export default function plugin(bb: BbPluginApi) {
       }
       return { entries };
     },
-    unstop: async ({ hostId, session }) => host.call('unstop', { session }, { hostId }),
+    unstop: async ({ hostId, session }) => {
+      const r = await host.call('unstop', { session }, { hostId });
+      const threadId = session.replace(/^bb-/, '');
+      await forgetStop(threadId, hostId);
+      return r;
+    },
+    stop: async ({ hostId, threadId }) => stopThread(threadId, hostId ? [hostId] : null, 'настройки плагина'),
+    resume: async ({ hostId, threadId }) => resumeThread(threadId, hostId ? [hostId] : null),
     journal: async () => ({ entries: ((await bb.storage.kv.get<JournalEntry[]>('journal')) ?? []).slice(0, 30) }),
   });
 

@@ -2,6 +2,20 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/), versions: [SemVer](https://semver.org/). Git tags: `vX.Y.Z`.
 
+## [0.5.0] — 2026-11-25
+
+### Fixed
+- The HUD's «Стоп» button still got no clicks: the overlay asked for events with the JXA constant `$.NSEventMaskAny`, which bridges to 0 and matches nothing. It now passes the mask as a number (checked on a MacBook: with 0 no event arrives, with 4294967295 it does).
+- Stop now cuts the action in flight short: a running driver call (a `run_steps` batch too) is killed and the driver daemon stopped (the only way to end a running batch, checked on a MacBook: a 10-step batch ended at the moment of the stop instead of running 22 s; the daemon restarts on the next call); a running AppleScript helper is killed. Before, Stop was checked only before a call.
+- Stopping a thread in BB now reaches the Mac: the tools pass the call's cancel signal to the Mac, which aborts the action and blocks the thread until an explicit resume.
+- A stop no longer expires after 12 hours: it lasts until «Allow again».
+- An AppleScript that timed out kept running in the helper; it is now killed.
+
+### Added
+- `bb mac-computer-use stop --thread thr_… [--machine <Mac>]`: abort the thread's actions in flight, revoke its access on the Mac (also inside the driver: `cua-driver revoke --session`) and stop its turn in BB. `resume` lifts it (a thread cannot lift its own stop), `stopped` lists stops. Settings RPC `stop`/`resume` by `{hostId, threadId}`; host RPC `stop {session}`.
+- Queue hold: while a thread is stopped, messages from agents, automations and the system to it wait (`message.dispatch` hook); the user's own messages go through. «Allow again» releases the queue.
+- Shared stop list on the Mac (`~/Library/Application Support/bb-agent-stop/stopped-threads.json`), read and written by Browser Relay as well: one stop blocks the thread's browser calls through the relay too. A HUD Stop click also stops the BB thread, which ends its terminal commands.
+
 ## [0.4.3] — 2026-11-23
 
 ### Fixed

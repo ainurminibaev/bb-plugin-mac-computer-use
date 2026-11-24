@@ -173,13 +173,16 @@ function run(argv) {
   }
   function hideAll() { fade([hud, ptr], 0, 220); hideAt = 0; hiddenSince = Date.now(); session = ''; stepNo = 0; startedAt = 0; }
 
+  // NSEventMaskAny as a number: the JXA bridge turns that named constant into 0, which
+  // matches no event at all (checked on a MacBook), so clicks never reached Stop.
+  const ANY_EVENT = 4294967295;
   for (;;) {
     // 20 Hz while a session runs, 4 Hz otherwise. A bare NSRunLoop.runUntilDate never
     // hands mouse events to the windows, so Stop and the HUD drag did nothing:
     // take events from NSApp and dispatch them until the deadline.
     const until = $.NSDate.dateWithTimeIntervalSinceNow(active ? 0.05 : 0.25);
     for (;;) {
-      const ev = app.nextEventMatchingMaskUntilDateInModeDequeue($.NSEventMaskAny, until, $.NSDefaultRunLoopMode, true);
+      const ev = app.nextEventMatchingMaskUntilDateInModeDequeue(ANY_EVENT, until, $.NSDefaultRunLoopMode, true);
       if (ev.isNil()) break;
       app.sendEvent(ev);
     }
@@ -193,7 +196,7 @@ function run(argv) {
       if (st && st.quit) break;
       if (st && st.seq !== lastSeq) {
         lastSeq = st.seq;
-        if (st.end) { if (session && (!st.session || st.session === session)) finish('Готово · BB', 1500); }
+        if (st.end) { if (session && (!st.session || st.session === session)) finish(st.stopped ? 'Агент остановлен · доступ этого треда отозван' : 'Готово · BB', st.stopped ? 3000 : 1500); }
         else startOrUpdate(st);
       }
     }

@@ -9,16 +9,17 @@ import { OVERLAY_JXA } from './overlay-script';
 import { Geometry } from './geometry';
 import { APPLET_BUNDLE_ID, APPLET_NAME, APPLET_SOURCE, APPLET_VERSION } from './automation-applet';
 import { createHash, randomUUID } from 'node:crypto';
+import { Inflight, STOPPED_TEXT, StopRegistry } from './stop';
 
 const MAX_TEXT = 60_000;
 const APP = '/Applications/CuaDriver.app';
 const APP_BIN = `${APP}/Contents/MacOS/cua-driver`;
 const ENV = { ...process.env, CUA_DRIVER_RS_TELEMETRY_ENABLED: '0' };
 
-/** Runs a program without a shell; resolves with exit code and output even on failure. */
-function run(file: string, args: string[], timeout = 120_000): Promise<{ code: number; stdout: string; stderr: string }> {
+/** Runs a program without a shell; resolves with exit code and output even on failure. `signal` kills it. */
+function run(file: string, args: string[], timeout = 120_000, signal?: AbortSignal): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise(resolve => {
-    execFile(file, args, { timeout, maxBuffer: 64 * 1024 * 1024, env: ENV }, (error, stdout, stderr) => {
+    execFile(file, args, { timeout, maxBuffer: 64 * 1024 * 1024, env: ENV, ...(signal ? { signal } : {}) }, (error, stdout, stderr) => {
       const raw = (error as { code?: unknown } | null)?.code;
       const code = error ? (typeof raw === 'number' ? raw : 1) : 0;
       const err = String(stderr ?? '') || (error && !stdout ? String(error.message) : '');
@@ -239,33 +240,52 @@ const alive = (pid: number | null) => { if (!pid) return false; try { process.ki
 
 const STOP_REQUEST = join(OVERLAY_DIR, 'stop-request.json');
 const STOPPED = join(OVERLAY_DIR, 'stopped-sessions.json');
-const STOP_TTL_MS = 12 * 3600_000;
+/** Shared with other BB plugins acting on this Mac (Browser Relay): one Stop blocks them all. */
+const SHARED_STOPPED = join(homedir(), 'Library/Application Support/bb-agent-stop/stopped-threads.json');
+const stops = new StopRegistry({ sessions: STOPPED, shared: SHARED_STOPPED, request: STOP_REQUEST });
+const inflight = new Inflight();
+/** Sessions with a driver CLI call running right now: Stop has to stop the daemon to cut it short. */
+const driverBusy = new Map<string, number>();
 
 type Caption = { title: string; step: string; session: string; label?: string };
 
-async function readStopped(): Promise<Record<string, number>> {
-  try {
-    const all = JSON.parse(await readFile(STOPPED, 'utf8')) as Record<string, number>;
-    return Object.fromEntries(Object.entries(all).filter(([, at]) => Date.now() - at < STOP_TTL_MS));
-  } catch { return {}; }
+/**
+ * Stops one session: blocks it until an explicit resume, aborts its calls in
+ * flight and, if a driver action is running, stops the driver daemon (the only
+ * way to cut a running batch short, checked on a MacBook; it restarts on the
+ * next call). Also revokes
+ * the session inside the driver, so a direct `cua-driver call` with this label
+ * is refused too.
+ */
+async function halt(session: string, reason: string): Promise<{ aborted: number }> {
+  await stops.stop(session);
+  // Aborting a call with a driver action running also stops the daemon (see `cut` in `call`).
+  const aborted = inflight.abort(session, reason);
+  const driver = process.platform === 'darwin' ? await driverPath() : null;
+  if (driver) await run(driver, ['revoke', '--session', session], 10_000);
+  await stoppedOverlay(session).catch(() => undefined);
+  return { aborted };
 }
 
-async function writeStopped(all: Record<string, number>): Promise<void> {
-  await mkdir(OVERLAY_DIR, { recursive: true });
-  await writeFile(`${STOPPED}.tmp`, JSON.stringify(all));
-  await rename(`${STOPPED}.tmp`, STOPPED);
-}
-
-/** Moves a pending «Stop agent» click into the stopped list; returns that list. */
-async function collectStops(): Promise<Record<string, number>> {
-  const all = await readStopped();
-  try {
-    const req = JSON.parse(await readFile(STOP_REQUEST, 'utf8')) as { session?: string; at?: number };
-    await unlink(STOP_REQUEST).catch(() => undefined);
-    if (req.session) all[req.session] = req.at ?? Date.now();
-    await writeStopped(all);
-  } catch { /* no pending click */ }
-  return all;
+/** While calls run, watch for a HUD «Stop» click and for stops written by other plugins. */
+let watchTimer: ReturnType<typeof setInterval> | null = null;
+let watchTick = 0;
+let watching = false;
+function watchStops(): void {
+  if (watchTimer) return;
+  watchTimer = setInterval(() => {
+    if (watching) return;
+    if (!inflight.count()) { clearInterval(watchTimer!); watchTimer = null; return; }
+    watching = true;
+    void (async () => {
+      const click = await stops.pendingClick();
+      if (click) { await stops.collectClick(); if (inflight.count(click)) await halt(click, 'user'); }
+      if (++watchTick % 4 === 0) {
+        const all = await stops.stopped();
+        for (const s of Object.keys(all)) if (inflight.count(s)) await halt(s, 'user');
+      }
+    })().catch(() => undefined).finally(() => { watching = false; });
+  }, 250);
 }
 
 type Point = { x: number; y: number };
@@ -320,6 +340,15 @@ async function showOverlay(caption: Caption, pos: Point | null, ttlMs: number, o
     try { if ((JSON.parse(await readFile(MOVE_ACK, 'utf8')) as { seq?: number }).seq === seq) return; } catch { /* not yet */ }
     await new Promise(r => setTimeout(r, 40));
   }
+}
+
+/** Session stopped: the HUD says so and hides. */
+async function stoppedOverlay(session: string): Promise<void> {
+  progress.delete(session);
+  await mkdir(OVERLAY_DIR, { recursive: true });
+  const tmp = `${OVERLAY_STATE}.tmp`;
+  await writeFile(tmp, JSON.stringify({ seq: ++overlaySeq, end: true, stopped: true, session }));
+  await rename(tmp, OVERLAY_STATE);
 }
 
 /** Session finished (turn ended, failed, thread archived): the HUD shows «Готово» and hides. */
@@ -394,7 +423,7 @@ async function ensureApplet(): Promise<void> {
   }
 }
 
-async function runAppleScript(script: string, timeoutMs: number): Promise<{ ok: boolean; text: string; timedOut: boolean }> {
+async function runAppleScript(script: string, timeoutMs: number, signal?: AbortSignal): Promise<{ ok: boolean; text: string; timedOut: boolean; aborted?: boolean }> {
   await ensureApplet();
   const reqDir = join(APPLET_DIR, 'requests');
   await mkdir(reqDir, { recursive: true });
@@ -405,14 +434,18 @@ async function runAppleScript(script: string, timeoutMs: number): Promise<{ ok: 
     const launched = await run('/usr/bin/open', ['-g', '-n', '-a', APPLET, '--args', req], 15_000);
     if (launched.code !== 0) return { ok: false, text: `Не удалось запустить ${APPLET_NAME}: ${joinOut(launched)}`, timedOut: false };
     const until = Date.now() + timeoutMs;
+    // The helper runs the script in its own process (the request path is its last argument): kill it on Stop or timeout.
+    const kill = () => run('/usr/bin/pkill', ['-f', req], 10_000);
     while (Date.now() < until) {
+      if (signal?.aborted) { await kill(); return { ok: false, text: STOPPED_TEXT, timedOut: false, aborted: true }; }
       try {
         const text = await readFile(out, 'utf8');
         const ok = text.startsWith('OK');
         return { ok, text: clip(text.replace(/^OK\n?/, '')), timedOut: false };
       } catch { await new Promise(r => setTimeout(r, 200)); }
     }
-    return { ok: false, text: `Нет ответа за ${Math.round(timeoutMs / 1000)} с. Возможно, на Mac открыт системный запрос «${APPLET_NAME}» хочет управлять приложением — пользователь должен ответить на него, — или скрипт ещё выполняется.`, timedOut: true };
+    await kill();
+    return { ok: false, text: `Нет ответа за ${Math.round(timeoutMs / 1000)} с, скрипт остановлен. Возможно, на Mac был открыт системный запрос «${APPLET_NAME}» хочет управлять приложением — пользователь должен ответить на него, затем повтори.`, timedOut: true };
   } finally {
     await rm(req, { force: true });
     await rm(out, { force: true });
@@ -427,7 +460,7 @@ export default experimental_defineHostEntry({
       const version = driver ? (await run(driver, ['--version'], 15_000)).stdout.trim().replace(/^cua-driver\s+/, '') || null : null;
       return { platform: process.platform, arch: arch(), driver, version };
     },
-    call: async ({ tool, args, session, wantImage, maxImageWidth, display }) => {
+    call: async ({ tool, args, session, wantImage, maxImageWidth, display }, ctx) => {
       const driver = await requireDriver();
       // Arguments must be one JSON object; the driver validates the tool's own schema.
       const parsed: unknown = JSON.parse(args || '{}');
@@ -437,67 +470,89 @@ export default experimental_defineHostEntry({
       // snapshot (and its element tokens) is gone by the next call.
       if (session && input.session === undefined && (await schemaOf(driver, tool))?.props.session) input.session = session;
       await ensureDaemon(driver);
-      if (session && (await collectStops())[session]) {
+      if (session && await stops.isStopped(session)) {
         await prepareCursor(driver, session, false).catch(() => undefined);
-        return { ok: false, exitCode: 75, text: 'STOPPED_BY_USER: пользователь нажал «Остановить агента» на этом Mac; GUI-доступ для этого сеанса отозван.', image: null };
+        return { ok: false, exitCode: 75, text: STOPPED_TEXT, image: null };
       }
-      const visible = !!(display?.show && session);
-      const realMouse = visible && !!display?.realMouse;
-      // The driver's own agent cursor is only useful when the real pointer stays put.
-      if (session) await prepareCursor(driver, session, visible && !realMouse).catch(() => undefined);
-      const caption: Caption | null = visible ? { title: display!.title, step: display!.step, session: session!, label: display!.label } : null;
-      const opts: OverlayOpts = { theme: display?.theme ?? 'dark' };
-      // Window snapshots: ask for element frames too (for gliding to a token), hand back only what the agent asked for.
-      const agentTree = tool === 'get_window_state' ? input.tree_format : undefined;
-      if (tool === 'get_window_state' && (agentTree === undefined || agentTree === 'markdown')) input.tree_format = 'both';
-      let target: Point | null = null;
-      if (realMouse && REAL_MOUSE_TOOLS.has(tool)) {
-        target = targetPoint(tool, input);
-        const props = (await schemaOf(driver, tool))?.props ?? {};
-        if (props.delivery_mode && input.delivery_mode === undefined) input.delivery_mode = 'foreground';
-      }
-      const avoid = typeof input.element_token === 'string' ? frames.get(input.element_token) ?? null : null;
-      if (caption) await showOverlay(caption, target, 30_000, { ...opts, move: target, avoid, count: true }).catch(() => undefined);
-      // Visible mode: keep the target app in front so the user sees the action
-      // (a bare foreground delivery would restore the previous app afterwards).
-      if (realMouse && typeof input.pid === 'number' && (input.pid !== frontPid || Date.now() - frontAt > 5000) && !['bring_to_front', 'list_apps', 'list_windows', 'launch_app', 'get_window_state', 'get_desktop_state', 'zoom'].includes(tool)) {
-        await driverJson(driver, 'bring_to_front', { pid: input.pid, ...(session ? { session } : {}) });
-        frontPid = input.pid; frontAt = Date.now();     // already in front: skip for the next few seconds
-      }
-      if (display?.foreground && !realMouse && typeof input.pid === 'number' && !['bring_to_front', 'list_apps', 'list_windows', 'launch_app'].includes(tool))
-        await driverJson(driver, 'bring_to_front', { pid: input.pid, ...(session ? { session } : {}) });
-      const dir = await mkdtemp(join(tmpdir(), 'bb-mac-cu-'));
+      // From here the call can be cut short: HUD «Stop», `stop` RPC, BB thread stop (ctx.signal).
+      const flight = inflight.begin(session ?? '', ctx?.signal);
+      const signal = flight.ac.signal;
+      watchStops();
       try {
-        const png = join(dir, 'shot.png');
-        const argv = ['call', tool, JSON.stringify(input)];
-        if (wantImage) argv.push('--screenshot-out-file', png);
-        let r = await run(driver, argv);
-        // The daemon can report itself up a moment before its socket accepts calls.
-        if (r.code !== 0 && /daemon is not running/i.test(r.stdout + r.stderr)) {
-          daemonOkAt = 0;
-          await new Promise(res => setTimeout(res, 1500));
-          await ensureDaemon(driver);
-          r = await run(driver, argv);
+        const visible = !!(display?.show && session);
+        const realMouse = visible && !!display?.realMouse;
+        // The driver's own agent cursor is only useful when the real pointer stays put.
+        if (session) await prepareCursor(driver, session, visible && !realMouse).catch(() => undefined);
+        const caption: Caption | null = visible ? { title: display!.title, step: display!.step, session: session!, label: display!.label } : null;
+        const opts: OverlayOpts = { theme: display?.theme ?? 'dark' };
+        // Window snapshots: ask for element frames too (for gliding to a token), hand back only what the agent asked for.
+        const agentTree = tool === 'get_window_state' ? input.tree_format : undefined;
+        if (tool === 'get_window_state' && (agentTree === undefined || agentTree === 'markdown')) input.tree_format = 'both';
+        let target: Point | null = null;
+        if (realMouse && REAL_MOUSE_TOOLS.has(tool)) {
+          target = targetPoint(tool, input);
+          const props = (await schemaOf(driver, tool))?.props ?? {};
+          if (props.delivery_mode && input.delivery_mode === undefined) input.delivery_mode = 'foreground';
         }
-        const image = wantImage ? await loadImage(png, dir, maxImageWidth) : null;
-        let text = joinOut(r);
-        if (tool === 'get_window_state' && r.code === 0) {
-          try {
-            const out = JSON.parse(r.stdout) as Record<string, unknown>;
-            rememberGeometry(out);
-            if (agentTree === undefined || agentTree === 'markdown') delete out.elements;
-            text = [JSON.stringify(out, null, 2), r.stderr.trim()].filter(Boolean).join('\n');
-          } catch { /* keep raw text */ }
+        const avoid = typeof input.element_token === 'string' ? frames.get(input.element_token) ?? null : null;
+        if (caption) await showOverlay(caption, target, 30_000, { ...opts, move: target, avoid, count: true }).catch(() => undefined);
+        // Visible mode: keep the target app in front so the user sees the action
+        // (a bare foreground delivery would restore the previous app afterwards).
+        if (realMouse && typeof input.pid === 'number' && (input.pid !== frontPid || Date.now() - frontAt > 5000) && !['bring_to_front', 'list_apps', 'list_windows', 'launch_app', 'get_window_state', 'get_desktop_state', 'zoom'].includes(tool)) {
+          await driverJson(driver, 'bring_to_front', { pid: input.pid, ...(session ? { session } : {}) });
+          frontPid = input.pid; frontAt = Date.now();     // already in front: skip for the next few seconds
         }
-        if (visible) {
-          // Real-mouse mode: the halo rides on the real pointer; otherwise sit next to the driver's agent cursor.
-          const pos = realMouse ? target : (await cursorPosition(driver, session!).catch(() => null)) ?? lastPos.get(session!) ?? null;
-          if (pos) lastPos.set(session!, pos);
-          await showOverlay(caption!, pos, 4000, { ...opts, avoid }).catch(() => undefined);
+        if (display?.foreground && !realMouse && typeof input.pid === 'number' && !['bring_to_front', 'list_apps', 'list_windows', 'launch_app'].includes(tool))
+          await driverJson(driver, 'bring_to_front', { pid: input.pid, ...(session ? { session } : {}) });
+        const dir = await mkdtemp(join(tmpdir(), 'bb-mac-cu-'));
+        try {
+          const png = join(dir, 'shot.png');
+          const argv = ['call', tool, JSON.stringify(input)];
+          if (wantImage) argv.push('--screenshot-out-file', png);
+          const stoppedResult = { ok: false, exitCode: 75, text: STOPPED_TEXT, image: null };
+          if (signal.aborted) return stoppedResult;
+          const key = session ?? '';
+          // A running driver action (a run_steps batch especially) ends only when the daemon stops.
+          const cut = () => { if ((driverBusy.get(key) ?? 0) > 0) void run(driver, ['stop'], 15_000).then(() => { daemonOkAt = 0; }); };
+          const drive = async () => {
+            driverBusy.set(key, (driverBusy.get(key) ?? 0) + 1);
+            signal.addEventListener('abort', cut, { once: true });
+            try { return await run(driver, argv, 120_000, signal); }
+            finally { signal.removeEventListener('abort', cut); driverBusy.set(key, (driverBusy.get(key) ?? 1) - 1); if (!driverBusy.get(key)) driverBusy.delete(key); }
+          };
+          let r = await drive();
+          if (signal.aborted) return stoppedResult;
+          // The daemon can report itself up a moment before its socket accepts calls.
+          if (r.code !== 0 && /daemon is not running/i.test(r.stdout + r.stderr)) {
+            daemonOkAt = 0;
+            await new Promise(res => setTimeout(res, 1500));
+            await ensureDaemon(driver);
+            if (signal.aborted) return stoppedResult;
+            r = await drive();
+            if (signal.aborted) return stoppedResult;
+          }
+          const image = wantImage ? await loadImage(png, dir, maxImageWidth) : null;
+          let text = joinOut(r);
+          if (tool === 'get_window_state' && r.code === 0) {
+            try {
+              const out = JSON.parse(r.stdout) as Record<string, unknown>;
+              rememberGeometry(out);
+              if (agentTree === undefined || agentTree === 'markdown') delete out.elements;
+              text = [JSON.stringify(out, null, 2), r.stderr.trim()].filter(Boolean).join('\n');
+            } catch { /* keep raw text */ }
+          }
+          if (visible) {
+            // Real-mouse mode: the halo rides on the real pointer; otherwise sit next to the driver's agent cursor.
+            const pos = realMouse ? target : (await cursorPosition(driver, session!).catch(() => null)) ?? lastPos.get(session!) ?? null;
+            if (pos) lastPos.set(session!, pos);
+            await showOverlay(caption!, pos, 4000, { ...opts, avoid }).catch(() => undefined);
+          }
+          return { ok: r.code === 0, exitCode: r.code, text: clip(text), image };
+        } finally {
+          await rm(dir, { recursive: true, force: true });
         }
-        return { ok: r.code === 0, exitCode: r.code, text: clip(text), image };
       } finally {
-        await rm(dir, { recursive: true, force: true });
+        flight.done();
       }
     },
     describe: async ({ tool }) => {
@@ -528,22 +583,34 @@ export default experimental_defineHostEntry({
       return { started: true };
     },
     install: ({ version, teamId }) => install(version, teamId),
-    applescript: async ({ script, timeoutMs, display }) => {
+    applescript: async ({ script, timeoutMs, display, session: sessionIn }, ctx) => {
       if (process.platform !== 'darwin') throw new Error('Не macOS.');
-      if (display) {
-        if ((await collectStops())[display.session]) return { ok: false, text: 'STOPPED_BY_USER: пользователь нажал «Остановить агента» на этом Mac.', timedOut: false };
-        await showOverlay(display, null, timeoutMs, { theme: display.theme ?? 'dark', count: true }).catch(() => undefined);
+      // The thread's session is checked even when the HUD is off.
+      const session = sessionIn ?? display?.session ?? null;
+      if (session && await stops.isStopped(session)) return { ok: false, text: STOPPED_TEXT, timedOut: false };
+      if (display) await showOverlay(display, null, timeoutMs, { theme: display.theme ?? 'dark', count: true }).catch(() => undefined);
+      const flight = inflight.begin(session ?? '', ctx?.signal);
+      watchStops();
+      try {
+        const r = await runAppleScript(script, timeoutMs, flight.ac.signal);
+        if (r.aborted) return { ok: false, text: r.text, timedOut: false };
+        if (display) await showOverlay(display, null, 4000, { theme: display.theme ?? 'dark' }).catch(() => undefined);
+        return { ok: r.ok, text: r.text, timedOut: r.timedOut };
+      } finally {
+        flight.done();
       }
-      const r = await runAppleScript(script, timeoutMs);
-      if (display) await showOverlay(display, null, 4000, { theme: display.theme ?? 'dark' }).catch(() => undefined);
-      return r;
     },
     endSession: async ({ session }) => { await endOverlay(session).catch(() => undefined); return { ok: true }; },
-    stopped: async () => ({ sessions: Object.entries(await collectStops()).map(([session, at]) => ({ session, at })) }),
+    stopped: async () => ({ sessions: Object.entries(await stops.stopped()).map(([session, at]) => ({ session, at })) }),
+    stop: async ({ session }) => {
+      const { aborted } = await halt(session, 'stop');
+      return { ok: true, aborted };
+    },
     unstop: async ({ session }) => {
-      const all = await collectStops();
-      delete all[session];
-      await writeStopped(all);
+      await stops.resume(session);
+      // Re-open the driver session revoked on Stop.
+      const driver = process.platform === 'darwin' ? await driverPath() : null;
+      if (driver) await run(driver, ['call', 'start_session', JSON.stringify({ session })], 15_000);
       return { ok: true };
     },
     identity: async () => {

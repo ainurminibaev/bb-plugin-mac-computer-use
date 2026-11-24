@@ -65,9 +65,11 @@ export const hostContract = defineRpcContract({
   /** Sessions the user stopped with the overlay's «Stop agent» button. */
   stopped: { input: z.null(), output: z.object({ sessions: z.array(z.object({ session: z.string(), at: z.number() })) }) },
   unstop: { input: z.object({ session: z.string().max(100) }), output: z.object({ ok: z.boolean() }) },
+  /** Stops one session now: blocks it until `unstop`, aborts its calls in flight (driver batch, AppleScript). */
+  stop: { input: z.object({ session: z.string().min(1).max(100) }), output: z.object({ ok: z.boolean(), aborted: z.number() }) },
   /** Runs AppleScript through the «BB Automation» helper so macOS names it, not the BB host, in Automation prompts. */
   applescript: {
-    input: z.object({ script: z.string().min(1).max(50_000), timeoutMs: z.number().int().min(1000).max(300_000), display: z.object({ title: z.string().max(200), step: z.string().max(200), session: z.string().max(100), label: z.string().max(80).optional(), theme: z.enum(['dark', 'light', 'accent']).default('dark') }).nullable() }),
+    input: z.object({ script: z.string().min(1).max(50_000), timeoutMs: z.number().int().min(1000).max(300_000), display: z.object({ title: z.string().max(200), step: z.string().max(200), session: z.string().max(100), label: z.string().max(80).optional(), theme: z.enum(['dark', 'light', 'accent']).default('dark') }).nullable(), session: z.string().max(100).nullable().default(null) }),
     output: z.object({ ok: z.boolean(), text: z.string(), timedOut: z.boolean() }),
   },
   /** Salted SHA-256 of the Mac hardware UUID: a stable, non-reversible machine trait for rebinding access after a BB reinstall. */
@@ -109,6 +111,9 @@ export const rpcContract = defineRpcContract({
   grant: { input: z.object({ hostId: z.string() }), output: z.object({ started: z.boolean() }) },
   stopped: { input: z.null(), output: z.object({ entries: z.array(z.object({ hostId: z.string(), machine: z.string(), session: z.string(), threadId: z.string(), title: z.string(), at: z.number() })) }) },
   unstop: { input: z.object({ hostId: z.string(), session: z.string() }), output: z.object({ ok: z.boolean() }) },
+  /** Stop a BB thread on one Mac (or all when hostId is null): abort in flight, block until resume, stop the turn. */
+  stop: { input: z.object({ hostId: z.string().nullable().default(null), threadId: z.string().regex(/^thr_[A-Za-z0-9]{4,64}$/) }), output: z.object({ ok: z.boolean(), text: z.string() }) },
+  resume: { input: z.object({ hostId: z.string().nullable().default(null), threadId: z.string().regex(/^thr_[A-Za-z0-9]{4,64}$/) }), output: z.object({ ok: z.boolean(), text: z.string() }) },
   journal: {
     input: z.null(),
     output: z.object({ entries: z.array(z.object({ at: z.number(), machine: z.string(), threadId: z.string(), tool: z.string(), why: z.string(), result: z.string() })) }),

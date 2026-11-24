@@ -170,7 +170,7 @@ function StoppedAgents({ rpc }: { rpc: Rpc }) {
       <span className="min-w-0 flex-1 truncate">{e.title || e.threadId} <span className="text-xs text-muted-foreground">· {e.machine} · {new Date(e.at).toLocaleString()}</span></span>
       <Button size="sm" variant="outline" onClick={() => rpc.call('unstop', { hostId: e.hostId, session: e.session }).then(load)}>Разрешить снова</Button>
     </div>)}
-    <p className="text-xs text-muted-foreground">Остановка действует 12 часов или до «Разрешить снова». Другие треды продолжают работать по настройкам компьютера.</p>
+    <p className="text-xs text-muted-foreground">Остановка действует до «Разрешить снова» (или `bb mac-computer-use resume --thread …` из другого треда). Пока она действует, сообщения агентов и автоматизаций этому треду ждут; ваши сообщения проходят. Другие треды продолжают работать по настройкам компьютера.</p>
   </section>;
 }
 
